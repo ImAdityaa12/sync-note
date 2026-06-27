@@ -73,7 +73,7 @@ export async function POST(
   const user = await getCurrentUser();
   if (!user) return new Response("Unauthorized", { status: 401 });
 
-  const rl = rateLimit(`ops:push:${user.id}`, PUSH_PER_MIN, 60_000);
+  const rl = rateLimit(`ops:push:${user.id}:${documentId}`, PUSH_PER_MIN, 60_000);
   if (!rl.ok) return tooManyRequests(rl.retryAfter);
 
   // Fast path: reject an obviously-oversized body before any work.
@@ -128,7 +128,7 @@ export async function GET(
   const user = await getCurrentUser();
   if (!user) return new Response("Unauthorized", { status: 401 });
 
-  const rl = rateLimit(`ops:pull:${user.id}`, PULL_PER_MIN, 60_000);
+  const rl = rateLimit(`ops:pull:${user.id}:${documentId}`, PULL_PER_MIN, 60_000);
   if (!rl.ok) return tooManyRequests(rl.retryAfter);
 
   // Viewers may read; non-members get an indistinguishable 404.

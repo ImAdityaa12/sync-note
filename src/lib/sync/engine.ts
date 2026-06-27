@@ -128,12 +128,18 @@ export class SyncEngine {
           since
         );
         if (ops.length > 0) {
-          const before = rga.toString();
-          for (const op of ops) rga.apply(op);
-          if (rga.toString() !== before) changed = true;
-          // Persist BEFORE advancing the cursor — a reload must never skip ops
-          // that aren't yet in the snapshot.
-          await saveSnapshot(docId, rga.snapshot());
+          let appliedNew = false;
+          for (const op of ops) {
+            if (rga.apply(op)) appliedNew = true;
+          }
+          // Only persist when a genuinely new op landed — own ops pulled back
+          // are already in the snapshot, so skip the redundant write.
+          if (appliedNew) {
+            changed = true;
+            // Persist BEFORE advancing the cursor — a reload must never skip
+            // ops that aren't yet in the snapshot.
+            await saveSnapshot(docId, rga.snapshot());
+          }
         }
         if (latestSeq > since) {
           await setCursor(docId, latestSeq);
