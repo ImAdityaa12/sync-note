@@ -130,7 +130,8 @@ export async function shareDocument(input: {
       .where(eq(userTable.email, email))
       .limit(1);
     if (!target) {
-      return { ok: false, error: "No account with that email has signed up yet." };
+      // Neutral wording so an owner can't enumerate which emails have accounts.
+      return { ok: false, error: "Couldn't share with that email." };
     }
     if (target.id === actor.id) {
       return { ok: false, error: "You already own this document." };

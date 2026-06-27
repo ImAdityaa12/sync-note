@@ -114,7 +114,13 @@ export const documentMembers = pgTable(
     role: documentRole("role").notNull(),
     createdAt: timestamp("created_at").defaultNow().notNull(),
   },
-  (table) => [primaryKey({ columns: [table.documentId, table.userId] })]
+  (table) => [
+    primaryKey({ columns: [table.documentId, table.userId] }),
+    // The PK is keyed on document_id first, so listing a user's documents
+    // (filter by user_id alone) needs its own index — Postgres does not
+    // auto-index FK columns.
+    index("document_members_user_id_idx").on(table.userId),
+  ]
 );
 
 /**

@@ -15,6 +15,13 @@
       "when": 1782581950376,
       "tag": "0001_awesome_chimera",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1782583154187,
+      "tag": "0002_magenta_pestilence",
+      "breakpoints": true
     }
   ]
 }
