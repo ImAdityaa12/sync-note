@@ -1,4 +1,4 @@
-import { betterAuth } from "better-auth";
+import { betterAuth, type BetterAuthOptions } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { nextCookies } from "better-auth/next-js";
 
@@ -12,7 +12,36 @@ import { account, session, user, verification } from "@/db/schema";
  * Server-side session checks (the real authority) use `auth.api.getSession`.
  * The proxy does only an optimistic cookie check, never a DB read.
  */
+
+// Sessions are signed with BETTER_AUTH_SECRET. A missing secret in production
+// would silently fall back to an ephemeral one, invalidating sessions on every
+// restart and weakening cookie signing — fail fast instead.
+if (!process.env.BETTER_AUTH_SECRET && process.env.NODE_ENV === "production") {
+  throw new Error(
+    "BETTER_AUTH_SECRET is not set. Generate one with `openssl rand -base64 32` and add it to your environment."
+  );
+}
+
+// Register a social provider only when both its id and secret are present.
+// Registering with empty strings would surface broken buttons that fail at the
+// provider; instead the UI hides any provider missing from this list.
+const socialProviders: BetterAuthOptions["socialProviders"] = {};
+if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
+  socialProviders.google = {
+    clientId: process.env.GOOGLE_CLIENT_ID,
+    clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+  };
+}
+if (process.env.GITHUB_CLIENT_ID && process.env.GITHUB_CLIENT_SECRET) {
+  socialProviders.github = {
+    clientId: process.env.GITHUB_CLIENT_ID,
+    clientSecret: process.env.GITHUB_CLIENT_SECRET,
+  };
+}
+
 export const auth = betterAuth({
+  secret: process.env.BETTER_AUTH_SECRET,
+
   database: drizzleAdapter(db, {
     provider: "pg",
     schema: { user, session, account, verification },
@@ -24,16 +53,7 @@ export const auth = betterAuth({
     autoSignIn: true,
   },
 
-  socialProviders: {
-    google: {
-      clientId: process.env.GOOGLE_CLIENT_ID ?? "",
-      clientSecret: process.env.GOOGLE_CLIENT_SECRET ?? "",
-    },
-    github: {
-      clientId: process.env.GITHUB_CLIENT_ID ?? "",
-      clientSecret: process.env.GITHUB_CLIENT_SECRET ?? "",
-    },
-  },
+  socialProviders,
 
   session: {
     expiresIn: 60 * 60 * 24 * 7, // 7 days

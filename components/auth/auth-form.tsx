@@ -6,6 +6,8 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { Eye, EyeOff, Loader2 } from "lucide-react";
 
 import { authClient } from "@/lib/auth-client";
+import { safeInternalPath } from "@/lib/safe-redirect";
+import type { SocialProvider } from "@/lib/social-providers";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -13,10 +15,17 @@ import { SocialButtons } from "@/components/auth/social-buttons";
 
 type Mode = "sign-in" | "sign-up";
 
-export function AuthForm({ mode }: { mode: Mode }) {
+export function AuthForm({
+  mode,
+  socialProviders = [],
+}: {
+  mode: Mode;
+  socialProviders?: SocialProvider[];
+}) {
   const router = useRouter();
   const params = useSearchParams();
-  const redirectTo = params.get("redirect") || "/dashboard";
+  // Constrain to internal paths so `?redirect=` can't bounce users off-site.
+  const redirectTo = safeInternalPath(params.get("redirect"));
   const isSignUp = mode === "sign-up";
 
   const [showPassword, setShowPassword] = React.useState(false);
@@ -72,20 +81,25 @@ export function AuthForm({ mode }: { mode: Mode }) {
         </p>
       </div>
 
-      <SocialButtons
-        pending={pending}
-        setPending={setPending}
-        setError={setError}
-        redirectTo={redirectTo}
-      />
+      {socialProviders.length > 0 && (
+        <>
+          <SocialButtons
+            providers={socialProviders}
+            pending={pending}
+            setPending={setPending}
+            setError={setError}
+            redirectTo={redirectTo}
+          />
 
-      <div className="flex items-center gap-3">
-        <span className="h-px flex-1 bg-border" />
-        <span className="text-xs text-muted-foreground">
-          or continue with email
-        </span>
-        <span className="h-px flex-1 bg-border" />
-      </div>
+          <div className="flex items-center gap-3">
+            <span className="h-px flex-1 bg-border" />
+            <span className="text-xs text-muted-foreground">
+              or continue with email
+            </span>
+            <span className="h-px flex-1 bg-border" />
+          </div>
+        </>
+      )}
 
       <form onSubmit={onSubmit} className="space-y-4" noValidate>
         {isSignUp && (
