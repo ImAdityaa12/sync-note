@@ -1,11 +1,12 @@
 import Link from "next/link";
-import { ArrowLeft, PenLine } from "lucide-react";
+import { ArrowLeft } from "lucide-react";
 
 import type { DocumentDetail } from "@/modules/documents/types";
 import { DocumentTitle } from "@/modules/documents/ui/components/document-title";
 import { MembersPanel } from "@/modules/documents/ui/components/members-panel";
 import { RoleBadge } from "@/modules/documents/ui/components/role-badge";
 import { ShareDialog } from "@/modules/documents/ui/components/share-dialog";
+import { MarkdownEditor } from "@/modules/editor/ui/components/markdown-editor";
 
 export function DocumentDetailView({
   detail,
@@ -40,17 +41,10 @@ export function DocumentDetailView({
         </div>
       </div>
 
-      {/* Editor surface — the local-first markdown editor lands in Phase B. */}
-      <section className="flex flex-col items-center rounded-xl border border-dashed px-6 py-16 text-center">
-        <span className="inline-flex size-12 items-center justify-center rounded-full bg-muted text-muted-foreground">
-          <PenLine className="size-5" strokeWidth={1.75} />
-        </span>
-        <h2 className="mt-4 text-lg font-medium">Editor coming next</h2>
-        <p className="mt-2 max-w-sm text-sm text-muted-foreground">
-          The local-first markdown editor, offline sync, and version history are
-          the next milestone. Access and roles for this document are wired up.
-        </p>
-      </section>
+      {/* Local-first markdown editor — IndexedDB is the source of truth.
+          Background sync to other collaborators arrives in Phase D.
+          Keyed by id so switching documents remounts with fresh local state. */}
+      <MarkdownEditor key={detail.id} docId={detail.id} canEdit={canEdit} />
 
       <section className="space-y-3">
         <div className="flex items-center justify-between">
