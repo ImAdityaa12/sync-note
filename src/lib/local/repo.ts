@@ -62,7 +62,44 @@ export async function appendOps(docId: string, ops: Op[]): Promise<void> {
 /** Pending (unsynced) ops for a document, in local order. Used by the sync engine. */
 export async function getPendingOps(docId: string): Promise<OplogRecord[]> {
   const db = await getLocalDB();
-  return db.getAllFromIndex("oplog", "by-doc", docId);
+  const records: OplogRecord[] = [];
+  // Iterate so we attach the real primary key (localSeq) regardless of whether
+  // the generated in-line key was written back onto the stored value.
+  let cursor = await db
+    .transaction("oplog")
+    .store.index("by-doc")
+    .openCursor(docId);
+  while (cursor) {
+    records.push({ ...cursor.value, localSeq: cursor.primaryKey });
+    cursor = await cursor.continue();
+  }
+  return records;
+}
+
+/** Remove acked ops from the outgoing queue, by their local keys. */
+export async function pruneOps(localSeqs: number[]): Promise<void> {
+  if (localSeqs.length === 0) return;
+  const db = await getLocalDB();
+  const tx = db.transaction("oplog", "readwrite");
+  await Promise.all(localSeqs.map((key) => tx.store.delete(key)));
+  await tx.done;
+}
+
+/** The highest server seq this client has pulled + applied for a document. */
+export async function getCursor(docId: string): Promise<number> {
+  const db = await getLocalDB();
+  const meta = await db.get("meta", docId);
+  return meta?.lastServerSeq ?? 0;
+}
+
+/** Advance the pull cursor, preserving the site id. */
+export async function setCursor(docId: string, lastServerSeq: number): Promise<void> {
+  const db = await getLocalDB();
+  const meta = (await db.get("meta", docId)) ?? {
+    docId,
+    siteId: crypto.randomUUID().replace(/-/g, "").slice(0, 8),
+  };
+  await db.put("meta", { ...meta, lastServerSeq });
 }
 
 /** Drop a document's local state entirely (e.g. after it's deleted). */

@@ -91,17 +91,20 @@ export class RGA {
   // Apply — idempotent, commutative integration of local or remote ops.
   // --------------------------------------------------------------------------
 
-  apply(op: Op): void {
+  /** Returns true iff this op materially changed the document (new, not a dup). */
+  apply(op: Op): boolean {
     // Advance the Lamport clock past anything we observe.
     if (op.id.counter > this.clock) this.clock = op.id.counter;
 
     if (op.type === "delete") {
-      this.deleted.add(idKey(op.id)); // grow-only set; commutes, idempotent
-      return;
+      const key = idKey(op.id);
+      if (this.deleted.has(key)) return false; // idempotent
+      this.deleted.add(key); // grow-only set; commutes
+      return true;
     }
 
     const key = idKey(op.id);
-    if (this.present.has(key)) return; // already integrated — idempotent
+    if (this.present.has(key)) return false; // already integrated — idempotent
 
     // Causal safety: an insert can only be placed once its origin exists.
     if (op.originLeft && !this.present.has(idKey(op.originLeft))) {
@@ -109,7 +112,7 @@ export class RGA {
       const queue = this.pending.get(originKey) ?? [];
       queue.push(op);
       this.pending.set(originKey, queue);
-      return;
+      return false; // buffered — not yet materialized
     }
 
     this.integrate(op);
@@ -120,6 +123,7 @@ export class RGA {
       this.pending.delete(key);
       for (const w of waiting) this.apply(w);
     }
+    return true;
   }
 
   private integrate(op: InsertOp): void {
