@@ -1,4 +1,4 @@
-import { GitHubIcon, LinkedInIcon } from "@/components/auth/provider-icons";
+import { GitHubIcon, LinkedInIcon } from "@/components/provider-icons";
 
 // Submission requirement: credit the developer (name, GitHub, LinkedIn).
 // TODO: confirm the display name and replace the LinkedIn URL before submission.

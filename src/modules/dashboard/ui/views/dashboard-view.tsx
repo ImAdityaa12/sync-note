@@ -1,29 +1,21 @@
-import { headers } from "next/headers";
 import Link from "next/link";
-import { redirect } from "next/navigation";
-import type { Metadata } from "next";
 import { FilePlus2 } from "lucide-react";
 
-import { auth } from "@/lib/auth";
 import { Logo } from "@/components/logo";
 import { ThemeToggle } from "@/components/theme-toggle";
-import { SignOutButton } from "@/components/auth/sign-out-button";
 import { SiteFooter } from "@/components/site-footer";
 import { UserAvatar } from "@/components/user-avatar";
+import { SignOutButton } from "@/modules/auth/ui/components/sign-out-button";
 
-export const metadata: Metadata = {
-  title: "Dashboard — sync-note",
+type DashboardViewProps = {
+  user: {
+    name: string;
+    email: string;
+    image?: string | null;
+  };
 };
 
-export default async function DashboardPage() {
-  // Authoritative server-side check. The proxy only does an optimistic cookie
-  // gate; this is the real validation against the session store.
-  const session = await auth.api.getSession({ headers: await headers() });
-  if (!session) {
-    redirect("/sign-in");
-  }
-
-  const { user } = session;
+export function DashboardView({ user }: DashboardViewProps) {
   const firstName = user.name?.split(" ")[0] || "there";
 
   return (

@@ -6,7 +6,7 @@ import { authClient } from "@/lib/auth-client";
 import type { SocialProvider } from "@/lib/social-providers";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
-import { GitHubIcon, GoogleIcon } from "@/components/auth/provider-icons";
+import { GitHubIcon, GoogleIcon } from "@/components/provider-icons";
 
 const PROVIDER_META: Record<
   SocialProvider,

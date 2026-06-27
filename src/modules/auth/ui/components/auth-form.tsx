@@ -11,7 +11,7 @@ import type { SocialProvider } from "@/lib/social-providers";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { SocialButtons } from "@/components/auth/social-buttons";
+import { SocialButtons } from "@/modules/auth/ui/components/social-buttons";
 
 type Mode = "sign-in" | "sign-up";
 
