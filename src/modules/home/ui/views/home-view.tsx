@@ -6,7 +6,7 @@ import { Logo } from "@/components/logo";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { SiteFooter } from "@/components/site-footer";
 
-export default function Home() {
+export function HomeView() {
   return (
     <div className="flex min-h-[100dvh] flex-col">
       <header className="flex h-16 items-center justify-between px-6">
