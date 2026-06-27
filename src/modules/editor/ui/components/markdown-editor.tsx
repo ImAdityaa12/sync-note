@@ -16,7 +16,7 @@ export function MarkdownEditor({
   docId: string;
   canEdit: boolean;
 }) {
-  const { content, setContent, status } = useDocument(docId);
+  const { content, onChange, status } = useDocument(docId);
   const online = useOnlineStatus();
   // The preview lags behind during rapid typing so re-parsing markdown never
   // blocks keystrokes; the textarea always reflects the latest value.
@@ -39,7 +39,7 @@ export function MarkdownEditor({
         <div className="grid gap-4 lg:grid-cols-2">
           <textarea
             value={content}
-            onChange={(event) => setContent(event.target.value)}
+            onChange={(event) => onChange(event.target.value)}
             placeholder="Start writing in markdown…"
             spellCheck
             aria-label="Markdown editor"
