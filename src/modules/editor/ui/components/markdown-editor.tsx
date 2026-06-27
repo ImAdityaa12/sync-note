@@ -1,13 +1,11 @@
 "use client";
 
-import { useDeferredValue } from "react";
+import { useDeferredValue, useLayoutEffect, useRef } from "react";
 
-import { cn } from "@/lib/utils";
 import { useDocument } from "@/modules/editor/hooks/use-document";
-import { useOnlineStatus } from "@/modules/editor/hooks/use-online-status";
 
+import { ConnectionStatus } from "./connection-status";
 import { MarkdownPreview } from "./markdown-preview";
-import { SaveIndicator } from "./save-indicator";
 
 export function MarkdownEditor({
   docId,
@@ -16,11 +14,22 @@ export function MarkdownEditor({
   docId: string;
   canEdit: boolean;
 }) {
-  const { content, onChange, status } = useDocument(docId);
-  const online = useOnlineStatus();
-  // The preview lags behind during rapid typing so re-parsing markdown never
-  // blocks keystrokes; the textarea always reflects the latest value.
+  const { content, onChange, status, syncStatus } = useDocument(docId, canEdit);
+  // The preview lags behind during rapid typing so re-parsing never blocks keys.
   const deferredContent = useDeferredValue(content);
+
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const caretRef = useRef(0);
+
+  // Keep the caret stable across re-renders — both the local echo and merged
+  // remote ops re-set `content`, which would otherwise jump the cursor.
+  useLayoutEffect(() => {
+    const ta = textareaRef.current;
+    if (ta && document.activeElement === ta) {
+      const pos = Math.min(caretRef.current, content.length);
+      ta.setSelectionRange(pos, pos);
+    }
+  }, [content]);
 
   const loading = status === "loading";
 
@@ -30,7 +39,11 @@ export function MarkdownEditor({
         <h2 className="text-sm font-medium">
           {canEdit ? "Editor" : "Read-only"}
         </h2>
-        <SaveIndicator status={status} online={online} canEdit={canEdit} />
+        <ConnectionStatus
+          syncStatus={syncStatus}
+          saveStatus={status}
+          canEdit={canEdit}
+        />
       </div>
 
       {loading ? (
@@ -38,8 +51,12 @@ export function MarkdownEditor({
       ) : canEdit ? (
         <div className="grid gap-4 lg:grid-cols-2">
           <textarea
+            ref={textareaRef}
             value={content}
-            onChange={(event) => onChange(event.target.value)}
+            onChange={(event) => {
+              caretRef.current = event.target.selectionStart;
+              onChange(event.target.value);
+            }}
             placeholder="Start writing in markdown…"
             spellCheck
             aria-label="Markdown editor"
@@ -50,11 +67,7 @@ export function MarkdownEditor({
           </div>
         </div>
       ) : (
-        <div
-          className={cn(
-            "min-h-[460px] overflow-auto rounded-xl border p-4"
-          )}
-        >
+        <div className="min-h-[460px] overflow-auto rounded-xl border p-4">
           <MarkdownPreview source={deferredContent} />
         </div>
       )}

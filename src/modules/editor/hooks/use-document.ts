@@ -10,6 +10,8 @@ import {
   loadDocumentRecord,
   saveSnapshot,
 } from "@/lib/local/repo";
+import { SyncEngine } from "@/lib/sync/engine";
+import type { SyncStatus } from "@/lib/sync/status";
 import { diffText } from "@/modules/editor/lib/text-diff";
 
 export type LocalSaveStatus = "loading" | "saving" | "saved";
@@ -17,25 +19,30 @@ export type LocalSaveStatus = "loading" | "saving" | "saved";
 const SAVE_DEBOUNCE_MS = 400;
 
 /**
- * Local-first, CRDT-backed document binding.
+ * Local-first, CRDT-backed document binding with background sync.
  *
- * Content lives in an in-memory `RGA`; every keystroke is diffed into CRDT ops,
+ * Content lives in an in-memory `RGA`. Every keystroke is diffed into ops,
  * applied synchronously (responsive typing), queued in the durable `oplog`, and
- * the snapshot is persisted to IndexedDB on a debounce. The network is never on
- * the path of a keystroke — the sync engine (Phase D) drains the oplog later.
+ * snapshotted to IndexedDB on a debounce. A `SyncEngine` drains that oplog to the
+ * server and merges remote ops back in — the network is never on the path of a
+ * keystroke. Editors push; viewers pull only.
  */
-export function useDocument(docId: string) {
+export function useDocument(docId: string, canEdit: boolean) {
   const [content, setContent] = useState("");
   const [status, setStatus] = useState<LocalSaveStatus>("loading");
+  const [syncStatus, setSyncStatus] = useState<SyncStatus>("connecting");
 
   const rgaRef = useRef<RGA | null>(null);
+  const engineRef = useRef<SyncEngine | null>(null);
   const pendingOpsRef = useRef<Op[]>([]);
   const dirtyRef = useRef(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Restore the CRDT from IndexedDB on open (or seed from legacy text / empty).
+  // Restore the CRDT from IndexedDB, then start the sync engine.
   useEffect(() => {
     let cancelled = false;
+    let engine: SyncEngine | null = null;
+
     (async () => {
       const siteId = await getOrCreateSiteId(docId);
       const record = await loadDocumentRecord(docId);
@@ -51,14 +58,30 @@ export function useDocument(docId: string) {
       rgaRef.current = rga;
       setContent(rga.toString());
       setStatus("saved");
+
+      engine = new SyncEngine({
+        docId,
+        rga,
+        canPush: canEdit,
+        onRemoteApplied: () => {
+          if (!cancelled) setContent(rga.toString());
+        },
+        onStatus: (s) => {
+          if (!cancelled) setSyncStatus(s);
+        },
+      });
+      engineRef.current = engine;
+      engine.start();
     })().catch(() => {
       if (!cancelled) setStatus("saved");
     });
 
     return () => {
       cancelled = true;
+      engine?.stop();
+      engineRef.current = null;
     };
-  }, [docId]);
+  }, [docId, canEdit]);
 
   const flush = useCallback(async () => {
     const rga = rgaRef.current;
@@ -70,6 +93,7 @@ export function useDocument(docId: string) {
       await appendOps(docId, ops);
       await saveSnapshot(docId, rga.snapshot());
       setStatus("saved");
+      engineRef.current?.notifyLocalChange(); // kick off a push
     } catch {
       // Best-effort: state stays in memory and retries on the next edit.
     }
@@ -83,7 +107,6 @@ export function useDocument(docId: string) {
       const prevText = rga.toString();
       if (nextText === prevText) return;
 
-      // Translate the edit into CRDT ops and apply locally (synchronous).
       const { index, deleteCount, insert } = diffText(prevText, nextText);
       if (deleteCount > 0) {
         pendingOpsRef.current.push(...rga.deleteAt(index, deleteCount));
@@ -93,7 +116,7 @@ export function useDocument(docId: string) {
       }
 
       dirtyRef.current = true;
-      setContent(rga.toString()); // equals nextText; keeps the textarea controlled
+      setContent(rga.toString());
       setStatus("saving");
 
       if (timerRef.current) clearTimeout(timerRef.current);
@@ -102,7 +125,6 @@ export function useDocument(docId: string) {
     [flush]
   );
 
-  // Persist promptly on tab-hide / unmount so the debounce window can't drop edits.
   useEffect(() => {
     function onVisibility() {
       if (document.visibilityState === "hidden") void flush();
@@ -115,5 +137,5 @@ export function useDocument(docId: string) {
     };
   }, [flush]);
 
-  return { content, onChange, status };
+  return { content, onChange, status, syncStatus };
 }

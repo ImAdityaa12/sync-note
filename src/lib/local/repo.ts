@@ -65,6 +65,32 @@ export async function getPendingOps(docId: string): Promise<OplogRecord[]> {
   return db.getAllFromIndex("oplog", "by-doc", docId);
 }
 
+/** Remove acked ops from the outgoing queue, by their local keys. */
+export async function pruneOps(localSeqs: number[]): Promise<void> {
+  if (localSeqs.length === 0) return;
+  const db = await getLocalDB();
+  const tx = db.transaction("oplog", "readwrite");
+  await Promise.all(localSeqs.map((key) => tx.store.delete(key)));
+  await tx.done;
+}
+
+/** The highest server seq this client has pulled + applied for a document. */
+export async function getCursor(docId: string): Promise<number> {
+  const db = await getLocalDB();
+  const meta = await db.get("meta", docId);
+  return meta?.lastServerSeq ?? 0;
+}
+
+/** Advance the pull cursor, preserving the site id. */
+export async function setCursor(docId: string, lastServerSeq: number): Promise<void> {
+  const db = await getLocalDB();
+  const meta = (await db.get("meta", docId)) ?? {
+    docId,
+    siteId: crypto.randomUUID().replace(/-/g, "").slice(0, 8),
+  };
+  await db.put("meta", { ...meta, lastServerSeq });
+}
+
 /** Drop a document's local state entirely (e.g. after it's deleted). */
 export async function deleteLocalDocument(docId: string): Promise<void> {
   const db = await getLocalDB();

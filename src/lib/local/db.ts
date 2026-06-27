@@ -32,6 +32,8 @@ export interface OplogRecord {
 export interface MetaRecord {
   docId: string;
   siteId: string;
+  /** Highest server `seq` this client has pulled and applied. */
+  lastServerSeq?: number;
 }
 
 interface SyncNoteDB extends DBSchema {
