@@ -4,6 +4,8 @@ import { z } from "zod";
 import { db } from "@/db";
 import { documentOps } from "@/db/schema";
 import { opSchema, type Op } from "@/lib/crdt/codec";
+import { PayloadTooLargeError, readJsonWithLimit } from "@/lib/http/read-json";
+import { rateLimit } from "@/lib/rate-limit";
 import {
   getCurrentUser,
   requireMembership,
@@ -22,18 +24,32 @@ import {
  * syncs can retry without duplicating.
  */
 
-const MAX_BODY_BYTES = 512 * 1024; // reject oversized bodies before parsing
+const MAX_BODY_BYTES = 256 * 1024; // hard ceiling enforced while streaming
 const MAX_OPS_PER_PUSH = 1000;
 const MAX_PULL = 1000;
+const PUSH_PER_MIN = 300;
+const PULL_PER_MIN = 300;
 
 const pushSchema = z.object({
   ops: z.array(opSchema).max(MAX_OPS_PER_PUSH),
 });
 
-/** Idempotency key: inserts key on the new node id; deletes on the target (namespaced). */
+/**
+ * Idempotency key: inserts key on the new node id; deletes on the target
+ * (namespaced). NB: clients self-assign op ids, so a malicious *editor* could
+ * pre-claim an id to drop another client's future op — an accepted trust
+ * assumption (editors are trusted collaborators), documented in the threat model.
+ */
 function opKey(op: Op): string {
   const base = `${op.id.counter}@${op.id.site}`;
   return op.type === "insert" ? base : `del:${base}`;
+}
+
+function tooManyRequests(retryAfter: number): Response {
+  return new Response("Too many requests", {
+    status: 429,
+    headers: { "retry-after": String(retryAfter) },
+  });
 }
 
 function jsonByteSize(value: unknown): number {
@@ -57,7 +73,10 @@ export async function POST(
   const user = await getCurrentUser();
   if (!user) return new Response("Unauthorized", { status: 401 });
 
-  // Cap before allocating — a massive body can't OOM us.
+  const rl = rateLimit(`ops:push:${user.id}`, PUSH_PER_MIN, 60_000);
+  if (!rl.ok) return tooManyRequests(rl.retryAfter);
+
+  // Fast path: reject an obviously-oversized body before any work.
   const contentLength = Number(request.headers.get("content-length") ?? "0");
   if (contentLength > MAX_BODY_BYTES) {
     return new Response("Payload too large", { status: 413 });
@@ -69,8 +88,13 @@ export async function POST(
 
   let body: unknown;
   try {
-    body = await request.json();
-  } catch {
+    // Real OOM defence: enforce the byte ceiling while streaming, so a missing
+    // or lying content-length can't get us to buffer an unbounded body.
+    body = await readJsonWithLimit(request, MAX_BODY_BYTES);
+  } catch (error) {
+    if (error instanceof PayloadTooLargeError) {
+      return new Response("Payload too large", { status: 413 });
+    }
     return new Response("Invalid JSON", { status: 400 });
   }
 
@@ -103,6 +127,9 @@ export async function GET(
 
   const user = await getCurrentUser();
   if (!user) return new Response("Unauthorized", { status: 401 });
+
+  const rl = rateLimit(`ops:pull:${user.id}`, PULL_PER_MIN, 60_000);
+  if (!rl.ok) return tooManyRequests(rl.retryAfter);
 
   // Viewers may read; non-members get an indistinguishable 404.
   const membership = await requireMembership(documentId, user.id, "viewer");

@@ -62,7 +62,18 @@ export async function appendOps(docId: string, ops: Op[]): Promise<void> {
 /** Pending (unsynced) ops for a document, in local order. Used by the sync engine. */
 export async function getPendingOps(docId: string): Promise<OplogRecord[]> {
   const db = await getLocalDB();
-  return db.getAllFromIndex("oplog", "by-doc", docId);
+  const records: OplogRecord[] = [];
+  // Iterate so we attach the real primary key (localSeq) regardless of whether
+  // the generated in-line key was written back onto the stored value.
+  let cursor = await db
+    .transaction("oplog")
+    .store.index("by-doc")
+    .openCursor(docId);
+  while (cursor) {
+    records.push({ ...cursor.value, localSeq: cursor.primaryKey });
+    cursor = await cursor.continue();
+  }
+  return records;
 }
 
 /** Remove acked ops from the outgoing queue, by their local keys. */

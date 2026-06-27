@@ -39,3 +39,11 @@ export async function pullOps(
   if (!res.ok) throw new SyncError(res.status);
   return res.json();
 }
+
+/** Pluggable transport so the engine can be tested against an in-memory server. */
+export interface SyncTransport {
+  push(docId: string, ops: Op[]): Promise<PushResult>;
+  pull(docId: string, since: number): Promise<PullResult>;
+}
+
+export const httpTransport: SyncTransport = { push: pushOps, pull: pullOps };

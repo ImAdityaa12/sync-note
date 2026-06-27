@@ -3,45 +3,50 @@ import {
   getCursor,
   getPendingOps,
   pruneOps,
+  saveSnapshot,
   setCursor,
 } from "@/lib/local/repo";
 
 import type { SyncStatus } from "./status";
-import { pullOps, pushOps } from "./transport";
+import { httpTransport, type SyncTransport } from "./transport";
 
 interface SyncEngineOptions {
   docId: string;
   rga: RGA;
   /** Editors/owners push; viewers pull only (and the server enforces it too). */
   canPush: boolean;
-  /** Called after remote ops are merged, so the editor can re-render. */
+  /** Called after remote ops change the document, so the editor can re-render. */
   onRemoteApplied: () => void;
   onStatus: (status: SyncStatus) => void;
+  /** Override the transport (tests inject an in-memory server). */
+  transport?: SyncTransport;
 }
 
 const POLL_MS = 2500; // background pull cadence
 const PUSH_DEBOUNCE_MS = 600; // coalesce bursts of local edits before pushing
 
 /**
- * Background sync engine. Reconciles the local CRDT with the server over HTTP:
- * drain the durable oplog → push (idempotent) → prune; then pull ops since the
- * saved cursor → merge into the RGA → advance the cursor. Survives offline and
- * interrupted syncs — unacked ops stay queued and retry, and re-applying an op
- * is a no-op on both client (CRDT) and server (idempotent insert).
+ * Background sync engine. Reconciles the local CRDT with the server: drain the
+ * durable oplog → push (idempotent) → prune; then pull ops since the saved
+ * cursor → merge into the RGA → **persist the snapshot → advance the cursor**.
  *
- * Real-time fan-out + presence/cursors arrive in the next step (WS relay); this
- * already gives multi-device convergence via polling.
+ * That ordering is what makes a reload safe: the cursor is never advanced past
+ * ops that aren't yet in the persisted snapshot, so merged remote edits can't be
+ * lost. Survives offline and interrupted syncs — unacked ops requeue and
+ * re-applying an op is a no-op on both client (CRDT) and server (idempotent).
  */
 export class SyncEngine {
   private readonly opts: SyncEngineOptions;
+  private readonly transport: SyncTransport;
   private running = false;
   private inFlight = false;
-  private rerun = false; // a sync was requested while one was running
+  private rerun = false;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private pushTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(opts: SyncEngineOptions) {
     this.opts = opts;
+    this.transport = opts.transport ?? httpTransport;
     this.onOnline = this.onOnline.bind(this);
     this.onOffline = this.onOffline.bind(this);
   }
@@ -51,7 +56,9 @@ export class SyncEngine {
     this.running = true;
     window.addEventListener("online", this.onOnline);
     window.addEventListener("offline", this.onOffline);
-    this.pollTimer = setInterval(() => void this.sync(), POLL_MS);
+    this.pollTimer = setInterval(() => {
+      if (this.running) void this.sync();
+    }, POLL_MS);
     void this.sync(); // initial catch-up on open
   }
 
@@ -77,13 +84,15 @@ export class SyncEngine {
     this.opts.onStatus("offline");
   }
 
-  private async sync(): Promise<void> {
-    if (!this.running) return;
-    if (typeof navigator !== "undefined" && !navigator.onLine) {
+  /** One reconcile cycle. Public so it can be driven deterministically in tests. */
+  async sync(): Promise<void> {
+    // Only treat an *explicit* offline signal as offline — `navigator.onLine` is
+    // absent in non-browser runtimes (and Node 21+ defines a partial navigator).
+    if (typeof navigator !== "undefined" && navigator.onLine === false) {
       this.opts.onStatus("offline");
       return;
     }
-    // Serialize: never overlap pushes/pulls; coalesce concurrent requests.
+    // Serialize: never overlap; coalesce a request that lands mid-run.
     if (this.inFlight) {
       this.rerun = true;
       return;
@@ -98,7 +107,7 @@ export class SyncEngine {
       if (canPush) {
         const pending = await getPendingOps(docId);
         if (pending.length > 0) {
-          await pushOps(
+          await this.transport.push(
             docId,
             pending.map((p) => p.op)
           );
@@ -110,14 +119,21 @@ export class SyncEngine {
         }
       }
 
-      // 2) Pull everything we haven't seen and merge it in.
+      // 2) Pull everything we haven't seen; merge, persist, then advance cursor.
       let since = await getCursor(docId);
-      let applied = false;
+      let changed = false;
       for (;;) {
-        const { ops, latestSeq, hasMore } = await pullOps(docId, since);
-        for (const op of ops) {
-          rga.apply(op);
-          applied = true;
+        const { ops, latestSeq, hasMore } = await this.transport.pull(
+          docId,
+          since
+        );
+        if (ops.length > 0) {
+          const before = rga.toString();
+          for (const op of ops) rga.apply(op);
+          if (rga.toString() !== before) changed = true;
+          // Persist BEFORE advancing the cursor — a reload must never skip ops
+          // that aren't yet in the snapshot.
+          await saveSnapshot(docId, rga.snapshot());
         }
         if (latestSeq > since) {
           await setCursor(docId, latestSeq);
@@ -126,7 +142,7 @@ export class SyncEngine {
         if (!hasMore) break;
       }
 
-      if (applied) this.opts.onRemoteApplied();
+      if (changed) this.opts.onRemoteApplied();
       this.opts.onStatus("synced");
     } catch {
       // Network/server error — stay queued and retry on the next tick.
