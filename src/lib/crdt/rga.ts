@@ -9,6 +9,13 @@ interface Node {
   originLeft: Id | null;
 }
 
+/** Serializable full state, persisted to IndexedDB and restored on open. */
+export interface RGASnapshot {
+  clock: number;
+  nodes: { id: Id; value: string; originLeft: Id | null }[];
+  deleted: string[];
+}
+
 /**
  * RGA (Replicated Growable Array) — a sequence CRDT for collaborative text.
  *
@@ -57,13 +64,13 @@ export class RGA {
     const visible = this.visibleNodes();
     let originLeft = index <= 0 ? null : visible[Math.min(index, visible.length) - 1].id;
     const ops: Op[] = [];
-    // Iterates by code point, so surrogate pairs / emoji stay one node.
-    for (const value of text) {
+    // One node per UTF-16 code unit, so editor string offsets map 1:1 to nodes.
+    for (let i = 0; i < text.length; i++) {
       const id: Id = { counter: ++this.clock, site: this.site };
-      const op: InsertOp = { type: "insert", id, value, originLeft };
+      const op: InsertOp = { type: "insert", id, value: text[i], originLeft };
       this.apply(op);
       ops.push(op);
-      originLeft = id; // chain: next char is inserted after this one
+      originLeft = id; // chain: next unit is inserted after this one
     }
     return ops;
   }
@@ -150,6 +157,40 @@ export class RGA {
       if (!this.deleted.has(idKey(node.id))) n++;
     }
     return n;
+  }
+
+  // --------------------------------------------------------------------------
+  // Persistence — serialize/restore the full materialized state (IndexedDB).
+  // --------------------------------------------------------------------------
+
+  snapshot(): RGASnapshot {
+    return {
+      clock: this.clock,
+      nodes: this.nodes.map((n) => ({
+        id: n.id,
+        value: n.value,
+        originLeft: n.originLeft,
+      })),
+      deleted: [...this.deleted],
+    };
+  }
+
+  /**
+   * Rebuild from a snapshot we previously wrote. `site` is the *local* replica's
+   * id (used for future local ops) — node ids already carry their own origin
+   * site, so this only governs new edits, not history.
+   */
+  static fromSnapshot(snapshot: RGASnapshot, site: string): RGA {
+    const rga = new RGA(site);
+    rga.clock = snapshot.clock;
+    rga.nodes = snapshot.nodes.map((n) => ({
+      id: n.id,
+      value: n.value,
+      originLeft: n.originLeft,
+    }));
+    for (const node of rga.nodes) rga.present.set(idKey(node.id), node);
+    rga.deleted = new Set(snapshot.deleted);
+    return rga;
   }
 
   private indexOf(id: Id): number {

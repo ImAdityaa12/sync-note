@@ -15,11 +15,11 @@ export const idSchema: z.ZodType<Id> = z.object({
   site: z.string().min(1).max(64),
 });
 
-/** A single inserted character (a code point; 1-2 UTF-16 units, more for ZWJ). */
+/** One inserted UTF-16 code unit (length 1; max 2 guards lone-surrogate edge cases). */
 const insertOpSchema = z.object({
   type: z.literal("insert"),
   id: idSchema,
-  value: z.string().min(1).max(16),
+  value: z.string().min(1).max(2),
   originLeft: idSchema.nullable(),
 });
 
