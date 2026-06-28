@@ -176,9 +176,9 @@ export function useDocument(docId: string, canEdit: boolean) {
   }, [flush]);
 
   // Report the local caret/selection so peers can render this client's cursor.
-  const onSelect = useCallback((anchor: number, head: number) => {
+  const reportCursor = useCallback((anchor: number, head: number) => {
     realtimeRef.current?.sendCursor(anchor, head);
   }, []);
 
-  return { content, onChange, status, syncStatus, peers, live, onSelect };
+  return { content, onChange, status, syncStatus, peers, live, reportCursor };
 }

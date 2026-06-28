@@ -20,6 +20,7 @@ export interface RealtimeClientOptions {
 
 const BASE_BACKOFF_MS = 500;
 const MAX_BACKOFF_MS = 15_000;
+const CURSOR_THROTTLE_MS = 50; // ~20 presence updates/sec is smooth + cheap
 
 /**
  * Client side of the realtime relay — a thin **live accelerator** over the
@@ -34,6 +35,9 @@ export class RealtimeClient {
   private stopped = false;
   private attempts = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private cursorTimer: ReturnType<typeof setTimeout> | null = null;
+  private pendingCursor: { anchor: number; head: number } | null = null;
+  private lastCursorAt = 0;
 
   constructor(private readonly opts: RealtimeClientOptions) {}
 
@@ -45,6 +49,7 @@ export class RealtimeClient {
   stop(): void {
     this.stopped = true;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    if (this.cursorTimer) clearTimeout(this.cursorTimer);
     const ws = this.ws;
     this.ws = null;
     ws?.close();
@@ -55,9 +60,34 @@ export class RealtimeClient {
     if (ops.length > 0) this.send({ t: "op", ops });
   }
 
-  /** Broadcast this client's caret/selection as presence. */
+  /**
+   * Broadcast this client's caret/selection as presence — throttled (leading +
+   * trailing) so fast typing can't flood the socket, while the final resting
+   * position is always delivered.
+   */
   sendCursor(anchor: number, head: number): void {
-    this.send({ t: "cursor", anchor, head });
+    this.pendingCursor = { anchor, head };
+    const elapsed = Date.now() - this.lastCursorAt;
+    if (elapsed >= CURSOR_THROTTLE_MS) {
+      this.flushCursor();
+    } else if (!this.cursorTimer) {
+      this.cursorTimer = setTimeout(
+        () => this.flushCursor(),
+        CURSOR_THROTTLE_MS - elapsed
+      );
+    }
+  }
+
+  private flushCursor(): void {
+    if (this.cursorTimer) {
+      clearTimeout(this.cursorTimer);
+      this.cursorTimer = null;
+    }
+    const cursor = this.pendingCursor;
+    if (!cursor) return;
+    this.pendingCursor = null;
+    this.lastCursorAt = Date.now();
+    this.send({ t: "cursor", anchor: cursor.anchor, head: cursor.head });
   }
 
   private send(frame: ClientFrame): void {
