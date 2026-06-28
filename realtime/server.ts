@@ -30,6 +30,22 @@ import { colorFor, Rooms, sendFrame, type Member } from "./rooms";
 const PORT = Number(process.env.REALTIME_PORT ?? 3001);
 /** Per-socket frame budget. Generous for real typing, fatal to a flood. */
 const FRAMES_PER_SEC = 60;
+/** Ping idle sockets this often; a pong not seen by the next tick = terminate. */
+const HEARTBEAT_MS = 30_000;
+
+/**
+ * Origin allowlist — defence-in-depth (the signed ticket is the real gate).
+ * Non-browser clients send no Origin and are allowed (they still need a valid
+ * ticket); when REALTIME_ALLOWED_ORIGINS is unset, all origins are allowed (dev).
+ */
+function originAllowed(origin: string | undefined): boolean {
+  if (!origin) return true;
+  const allowed = (process.env.REALTIME_ALLOWED_ORIGINS ?? "")
+    .split(",")
+    .map((o) => o.trim())
+    .filter(Boolean);
+  return allowed.length === 0 || allowed.includes(origin);
+}
 
 const rooms = new Rooms();
 let connCounter = 0;
@@ -45,7 +61,27 @@ const httpServer = createServer((req, res) => {
   res.end("Upgrade Required");
 });
 
-const wss = new WebSocketServer({ server: httpServer, maxPayload: MAX_FRAME_BYTES });
+const wss = new WebSocketServer({
+  server: httpServer,
+  maxPayload: MAX_FRAME_BYTES,
+  verifyClient: (info: { origin: string; secure: boolean; req: IncomingMessage }) =>
+    originAllowed(info.origin),
+});
+
+// Heartbeat: terminate sockets that stop answering pings, so a half-open
+// connection (and its room membership) can't leak.
+const alive = new WeakMap<WebSocket, boolean>();
+const heartbeat = setInterval(() => {
+  for (const client of wss.clients) {
+    if (alive.get(client) === false) {
+      client.terminate();
+      continue;
+    }
+    alive.set(client, false);
+    client.ping();
+  }
+}, HEARTBEAT_MS);
+wss.on("close", () => clearInterval(heartbeat));
 
 wss.on("connection", (socket: WebSocket, req: IncomingMessage) => {
   const url = new URL(req.url ?? "/", "http://localhost");
@@ -54,6 +90,9 @@ wss.on("connection", (socket: WebSocket, req: IncomingMessage) => {
     socket.close(4401, "unauthorized");
     return;
   }
+
+  alive.set(socket, true);
+  socket.on("pong", () => alive.set(socket, true));
 
   const documentId = auth.doc;
   // The client passes its CRDT site id so its cursor correlates with its ops.

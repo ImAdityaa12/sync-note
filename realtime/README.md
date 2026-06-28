@@ -47,6 +47,10 @@ npm run realtime:dev   # relay on :3001 (watches + reloads)
 The browser learns the relay URL from `NEXT_PUBLIC_REALTIME_URL`
 (defaults to `ws://localhost:3001`).
 
+With the relay running, `npm run realtime:verify` drives real sockets through
+the security + presence paths (auth, presence, cursor relay, viewer-gate,
+oversized-frame) without writing to the database.
+
 ## Environment
 
 | Var | Used for |
@@ -54,6 +58,7 @@ The browser learns the relay URL from `NEXT_PUBLIC_REALTIME_URL`
 | `DATABASE_URL` | Persisting ops (same Postgres as the app) |
 | `BETTER_AUTH_SECRET` | Verifying connection tickets |
 | `REALTIME_PORT` | Listen port (default `3001`) |
+| `REALTIME_ALLOWED_ORIGINS` | Comma-separated browser origins allowed to connect (empty = allow all) |
 | `NEXT_PUBLIC_REALTIME_URL` | *(app-side)* ws URL the client dials |
 
 ## Deploy

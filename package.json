@@ -12,6 +12,7 @@
     "test:watch": "vitest",
     "realtime:dev": "node --env-file=.env.local --import tsx realtime/server.ts",
     "realtime:start": "node --import tsx realtime/server.ts",
+    "realtime:verify": "node --env-file=.env.local --import tsx realtime/verify-relay.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "db:push": "drizzle-kit push",
