@@ -151,6 +151,22 @@ describe("RGA — core behaviour", () => {
     expect(out.toString()).toBe("xy");
   });
 
+  it("preserves buffered inserts across a snapshot (reload-safe)", () => {
+    const src = new RGA("a");
+    const [origin] = src.insertAt(0, "x");
+    const [child] = src.insertAt(1, "y"); // originLeft = origin.id
+
+    const out = new RGA("b");
+    out.apply(child); // arrives before its origin — buffered, not yet visible
+    expect(out.toString()).toBe("");
+
+    // Snapshot while the child is still buffered, then rebuild (a reload). The
+    // buffered op must survive, or it is lost once the pull cursor passes it.
+    const restored = RGA.fromSnapshot(out.snapshot(), "b");
+    restored.apply(origin); // origin arrives — must flush the restored buffer
+    expect(restored.toString()).toBe("xy");
+  });
+
   it("applies a delete that arrives before its target", () => {
     const src = new RGA("a");
     const [ins] = src.insertAt(0, "z");

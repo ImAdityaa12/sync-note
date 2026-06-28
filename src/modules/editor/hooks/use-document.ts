@@ -45,6 +45,19 @@ export function useDocument(docId: string, canEdit: boolean) {
   const dirtyRef = useRef(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Single serialized snapshot writer. Local edits, pulled remote ops, and the
+  // realtime path all persist through this one chain, so a stale write started
+  // earlier can never land after — and clobber — a newer one.
+  const writeChainRef = useRef<Promise<void>>(Promise.resolve());
+  const persist = useCallback((): Promise<void> => {
+    const done = writeChainRef.current.then(async () => {
+      const rga = rgaRef.current;
+      if (rga) await saveSnapshot(docId, rga.snapshot());
+    });
+    writeChainRef.current = done.catch(() => {}); // keep the chain alive on error
+    return done;
+  }, [docId]);
+
   // Restore the CRDT from IndexedDB, then start the sync engine.
   useEffect(() => {
     let cancelled = false;
@@ -77,6 +90,7 @@ export function useDocument(docId: string, canEdit: boolean) {
         onStatus: (s) => {
           if (!cancelled) setSyncStatus(s);
         },
+        persist,
       });
       engineRef.current = engine;
       engine.start();
@@ -90,11 +104,9 @@ export function useDocument(docId: string, canEdit: boolean) {
         onOps: (ops) => {
           let changed = false;
           for (const op of ops) if (rga.apply(op)) changed = true;
-          if (changed && !cancelled) {
-            setContent(rga.toString());
-            // Persist so a reload is safe even before the HTTP cursor catches up.
-            void saveSnapshot(docId, rga.snapshot());
-          }
+          // Apply + repaint only; durability is the engine's job (it persists
+          // before advancing the cursor), so we never write a snapshot here.
+          if (changed && !cancelled) setContent(rga.toString());
         },
         onPresence: (all) => {
           if (!cancelled) setPeers(all.filter((p) => p.site !== siteId));
@@ -118,7 +130,7 @@ export function useDocument(docId: string, canEdit: boolean) {
       setLive(false);
       setPeers([]);
     };
-  }, [docId, canEdit]);
+  }, [docId, canEdit, persist]);
 
   const flush = useCallback(async () => {
     const rga = rgaRef.current;
@@ -129,13 +141,13 @@ export function useDocument(docId: string, canEdit: boolean) {
     realtimeRef.current?.sendOps(ops); // broadcast live; durability handled below
     try {
       await appendOps(docId, ops);
-      await saveSnapshot(docId, rga.snapshot());
+      await persist();
       setStatus("saved");
       engineRef.current?.notifyLocalChange(); // kick off a push
     } catch {
       // Best-effort: state stays in memory and retries on the next edit.
     }
-  }, [docId]);
+  }, [docId, persist]);
 
   const onChange = useCallback(
     (nextText: string) => {
