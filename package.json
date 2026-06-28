@@ -7,8 +7,11 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
+    "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "realtime:dev": "node --env-file=.env.local --import tsx realtime/server.ts",
+    "realtime:start": "node --import tsx realtime/server.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "db:push": "drizzle-kit push",
@@ -48,6 +51,7 @@
     "fake-indexeddb": "^6.2.5",
     "fast-check": "^4.8.0",
     "tailwindcss": "^4",
+    "tsx": "^4.19.2",
     "typescript": "^5",
     "vitest": "^4.1.9"
   }
