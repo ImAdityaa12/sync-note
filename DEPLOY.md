@@ -77,15 +77,24 @@ this token as the **password**.
 ### 3.3 Push this repo to the Space
 
 HF Spaces are git repositories. From your local clone of **this** project, add the
-Space as a remote and push your branch to the Space's `main` (HF builds from
-`main`). The `Dockerfile` + `.dockerignore` mean only the relay is built, even
-though the whole repo is pushed:
+Space as a remote and push the branch that carries the `Dockerfile` — that's
+**`main`** — to the Space's `main` (HF builds from `main`). The `Dockerfile` +
+`.dockerignore` mean only the relay is built, even though the whole repo is pushed:
 
 ```bash
 # replace <owner> and the space name with yours
 git remote add space https://huggingface.co/spaces/<owner>/sync-note-realtime
-git push space develop:main        # local branch : Space's main
+git push space main:main --force   # local main : Space's main
 ```
+
+`--force` is required the first time: creating the Space seeded its `main` with an
+`initial commit` (a stub `README.md`), so your branch and the Space share no
+history and a plain push is rejected as a non-fast-forward. You're deliberately
+replacing that stub — §3.4 restores the config frontmatter this overwrites.
+
+> If the push fails with a protocol error like `fatal: expected 'acknowledgments'`,
+> this HF endpoint is choking on git's protocol v2 — prefix the command with
+> `-c protocol.version=0`, e.g. `git -c protocol.version=0 push space main:main --force`.
 
 ### 3.4 Confirm the Space's Docker config
 
