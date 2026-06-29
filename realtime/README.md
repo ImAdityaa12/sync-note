@@ -4,7 +4,8 @@ The standalone WebSocket server that gives sync-note its "Google-Docs feel":
 per-document rooms broadcasting CRDT ops and presence (live cursors + avatars)
 with sub-second latency. It runs as a **separate process** from the Next app —
 Vercel's serverless functions can't hold a long-lived socket — and deploys on
-its own (Railway / Fly / any Node host).
+its own as a **Hugging Face Docker Space** (root `Dockerfile`; see
+[`DEPLOY.md`](../DEPLOY.md)).
 
 It is intentionally thin and auditable. The pure, shared, unit-tested logic lives
 in `src/lib/realtime/` (the wire `protocol`, frame `validate`, and `ticket`
@@ -63,7 +64,9 @@ oversized-frame) without writing to the database.
 
 ## Deploy
 
-It's a plain Node service — point the host at `npm run realtime:start` (run
-`npm ci` first). `GET /health` returns `200 ok` for health checks. Set
-`DATABASE_URL` + `BETTER_AUTH_SECRET` to the **same** values as the Vercel app,
-and set the app's `NEXT_PUBLIC_REALTIME_URL` to this service's `wss://` URL.
+It's a plain Node service. The repo's root **`Dockerfile`** builds just this
+relay (listening on port `7860`) for a **Hugging Face Docker Space**; `GET /health`
+returns `200 ok`. Set `DATABASE_URL` + `BETTER_AUTH_SECRET` to the **same** values
+as the Vercel app, `REALTIME_ALLOWED_ORIGINS` to the app's origin, and the app's
+`NEXT_PUBLIC_REALTIME_URL` to this service's `wss://` URL. Full walkthrough:
+[`DEPLOY.md`](../DEPLOY.md).

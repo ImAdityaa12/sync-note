@@ -1,0 +1,13 @@
+# Build context for the realtime relay image. The Dockerfile only COPYs the
+# package manifests, tsconfig, src/, and realtime/ — everything else is noise.
+node_modules
+.next
+.git
+.github
+.env
+.env.*
+docs
+e2e
+coverage
+npm-debug.log*
+*.log
