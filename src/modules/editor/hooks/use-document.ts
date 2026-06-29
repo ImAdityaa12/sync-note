@@ -233,13 +233,19 @@ export function useDocument(docId: string, canEdit: boolean) {
 
   /**
    * Capture the current document for a version snapshot: the live materialized
-   * text together with the pull cursor it reflects. Read as a pair so the saved
-   * content and its `uptoSeq` watermark stay consistent.
+   * text together with the pull cursor it reflects.
+   *
+   * Read the cursor *first*, then the content. The engine applies pulled ops to
+   * the RGA before it advances the cursor, so content read after the cursor can
+   * only reflect the same-or-more server ops — never fewer. That keeps `baseSeq`
+   * an under-claim of what `content` covers (the compaction-safe direction); the
+   * reverse order would let a pull during the await push the cursor past the
+   * captured text and over-claim coverage.
    */
   const captureVersion = useCallback(async () => {
+    const baseSeq = await getCursor(docId);
     const rga = rgaRef.current;
     const content = rga ? rga.toString() : "";
-    const baseSeq = await getCursor(docId);
     return { content, baseSeq };
   }, [docId]);
 
