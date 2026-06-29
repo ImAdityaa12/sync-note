@@ -1,0 +1,57 @@
+name: CI
+
+# Runs on every PR into the long-lived branches and on direct pushes to them.
+# Lint, types, the unit/property suite, and a production build must all pass
+# before a feature branch can merge.
+on:
+  pull_request:
+    branches: [develop, main]
+  push:
+    branches: [develop, main]
+
+# A newer push to the same ref supersedes in-flight runs — don't burn minutes
+# verifying a commit that's already been replaced.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Lint · Types · Test · Build
+    runs-on: ubuntu-latest
+
+    # Build (NODE_ENV=production) and the test that imports the DB client both
+    # fail fast without these, so we supply throwaway values. They are NOT real
+    # credentials — nothing connects to a database or signs a real session
+    # during lint/typecheck/test/build; these only satisfy the load-time guards.
+    env:
+      DATABASE_URL: postgresql://ci:ci@localhost:5432/ci
+      BETTER_AUTH_SECRET: ci-placeholder-secret-not-used-for-real-auth
+      BETTER_AUTH_URL: http://localhost:3000
+      NEXT_PUBLIC_APP_URL: http://localhost:3000
+      NEXT_PUBLIC_REALTIME_URL: ws://localhost:3001
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit & property tests
+        run: npm test
+
+      - name: Production build
+        run: npm run build
