@@ -120,7 +120,7 @@ validation, and the streaming body cap.
 The Next app deploys to Vercel from `main`; the `realtime/` relay deploys
 separately as a long-running Node service (Railway / Fly) with an origin
 allowlist. Both share `DATABASE_URL` + `BETTER_AUTH_SECRET`; see
-`realtime/README.md`. Node is pinned to 22.
+`realtime/README.md`. Developed and run on Node 22.
 
 ## Credit
 

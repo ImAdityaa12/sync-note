@@ -34,8 +34,10 @@ Authorization lives in a single function, `requireMembership(documentId, userId,
 minRole)` (`src/modules/documents/server/membership.ts`). Roles are ranked
 (`viewer < editor < owner`), so "at least editor" is one comparison. A
 non-member or under-privileged user is treated **identically to a non-existent
-document** — callers return `404`, never `403` — so the API can't be used to
-enumerate which documents exist. Every read and write routes through it.
+document**: read paths answer `404`, write paths answer `403`, but in each case
+the response is the same whether the document is missing or simply isn't yours —
+so the API can't be used to enumerate which documents exist. Every read and
+write routes through it.
 
 ### 3. Role enforcement — viewers can never push state
 - **HTTP:** `POST /ops` requires `editor` (`403` otherwise); `GET /ops` requires
