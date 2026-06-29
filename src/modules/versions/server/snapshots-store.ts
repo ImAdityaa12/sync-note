@@ -17,8 +17,14 @@ import type { SnapshotState, VersionSummary } from "@/modules/versions/types";
  * Tenant scoping is the caller's job — every entry point in `actions.ts` funnels
  * through `requireMembership` first, exactly like the documents domain.
  */
-/** Most recent snapshots returned to the timeline (bounds an unbounded log). */
-export const MAX_VERSION_LIST = 100;
+/** One page of the version timeline. The log grows unbounded, so we page it. */
+export const VERSION_PAGE_SIZE = 50;
+
+export interface SnapshotPage {
+  versions: VersionSummary[];
+  /** Whether older snapshots exist beyond this page. */
+  hasMore: boolean;
+}
 
 /** Persist a snapshot and return its generated id. */
 export async function createSnapshot(input: {
@@ -42,14 +48,17 @@ export async function createSnapshot(input: {
 }
 
 /**
- * Snapshots for a document, newest first, with author identity for the timeline.
- * Capped at `MAX_VERSION_LIST`: the op/snapshot log grows without bound, so the
- * dialog never ships (or renders) an unbounded set. `id` is a stable secondary
- * sort key so same-timestamp versions don't reorder between reloads.
+ * One page of a document's snapshots, newest first, with author identity for the
+ * timeline. Paged (not capped) so an old, heavily-versioned document stays fully
+ * browsable without ever shipping an unbounded set. `id` is a stable secondary
+ * sort key so same-timestamp versions don't reorder between reloads/pages. We
+ * fetch one extra row to report `hasMore` without a second count query.
  */
 export async function listSnapshots(
-  documentId: string
-): Promise<VersionSummary[]> {
+  documentId: string,
+  offset = 0
+): Promise<SnapshotPage> {
+  const safeOffset = Math.max(0, offset);
   const rows = await db
     .select({
       id: documentSnapshots.id,
@@ -64,9 +73,11 @@ export async function listSnapshots(
     .innerJoin(user, eq(user.id, documentSnapshots.createdBy))
     .where(eq(documentSnapshots.documentId, documentId))
     .orderBy(desc(documentSnapshots.createdAt), desc(documentSnapshots.id))
-    .limit(MAX_VERSION_LIST);
+    .limit(VERSION_PAGE_SIZE + 1)
+    .offset(safeOffset);
 
-  return rows;
+  const hasMore = rows.length > VERSION_PAGE_SIZE;
+  return { versions: hasMore ? rows.slice(0, VERSION_PAGE_SIZE) : rows, hasMore };
 }
 
 /**

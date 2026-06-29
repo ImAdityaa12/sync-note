@@ -34,7 +34,11 @@ export const saveVersionSchema = z.object({
   baseSeq: z.number().int().min(0).optional(),
 });
 
-export const listVersionsSchema = z.object({ documentId });
+export const listVersionsSchema = z.object({
+  documentId,
+  /** Row offset for paging the timeline ("load older"); absent → first page. */
+  offset: z.number().int().min(0).optional(),
+});
 
 export const versionContentSchema = z.object({
   documentId,

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useState, useTransition } from "react";
+import { useCallback, useRef, useState, useTransition } from "react";
 import {
   ArrowLeft,
   History,
@@ -55,7 +55,13 @@ export function VersionHistory({
   const [open, setOpen] = useState(false);
 
   const [versions, setVersions] = useState<VersionSummary[] | null>(null);
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [listError, setListError] = useState<string | null>(null);
+  // Rows fetched so far (DB position for the next "load older" page). A ref, not
+  // derived from versions.length, because client-side dedupe can drop overlap
+  // rows while the server offset must still advance by the rows it returned.
+  const offsetRef = useRef(0);
 
   const [label, setLabel] = useState("");
   const [saving, startSave] = useTransition();
@@ -68,11 +74,40 @@ export function VersionHistory({
   const [confirming, setConfirming] = useState(false);
   const [restoring, startRestore] = useTransition();
 
+  // Load the first page (also used to refresh after a save).
   const loadVersions = useCallback(async () => {
     setListError(null);
-    const result = await listVersions({ documentId: docId });
-    if (result.ok) setVersions(result.data);
-    else setListError(result.error);
+    const result = await listVersions({ documentId: docId, offset: 0 });
+    if (result.ok) {
+      offsetRef.current = result.data.versions.length;
+      setVersions(result.data.versions);
+      setHasMore(result.data.hasMore);
+    } else {
+      setListError(result.error);
+    }
+  }, [docId]);
+
+  // Append the next page. Dedupe by id so a version saved between pages (which
+  // shifts the offset window) shows as an overlap to drop, never a skipped row.
+  const loadMore = useCallback(async () => {
+    setLoadingMore(true);
+    setListError(null);
+    const result = await listVersions({
+      documentId: docId,
+      offset: offsetRef.current,
+    });
+    if (result.ok) {
+      offsetRef.current += result.data.versions.length;
+      setVersions((prev) => {
+        const seen = new Set((prev ?? []).map((v) => v.id));
+        const fresh = result.data.versions.filter((v) => !seen.has(v.id));
+        return [...(prev ?? []), ...fresh];
+      });
+      setHasMore(result.data.hasMore);
+    } else {
+      setListError(result.error);
+    }
+    setLoadingMore(false);
   }, [docId]);
 
   // Drive the timeline from the open/close transition itself (not an effect):
@@ -82,6 +117,9 @@ export function VersionHistory({
     if (next) {
       void loadVersions();
     } else {
+      offsetRef.current = 0;
+      setVersions(null);
+      setHasMore(false);
       setSelected(null);
       setPreview(null);
       setPreviewError(null);
@@ -203,6 +241,20 @@ export function VersionHistory({
               error={listError}
               onSelect={openPreview}
             />
+
+            {versions && versions.length > 0 && hasMore && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="w-full"
+                onClick={loadMore}
+                disabled={loadingMore}
+              >
+                {loadingMore && <Loader2 className="size-4 animate-spin" />}
+                Load older versions
+              </Button>
+            )}
           </>
         )}
       </DialogContent>

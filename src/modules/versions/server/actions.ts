@@ -16,8 +16,8 @@ import {
   createSnapshot,
   getSnapshotContent,
   listSnapshots,
+  type SnapshotPage,
 } from "@/modules/versions/server/snapshots-store";
-import type { VersionSummary } from "@/modules/versions/types";
 
 /**
  * Version-history mutations and reads (snapshots + time-travel).
@@ -102,7 +102,8 @@ export async function saveVersion(input: {
 
 export async function listVersions(input: {
   documentId: string;
-}): Promise<ActionResult<VersionSummary[]>> {
+  offset?: number;
+}): Promise<ActionResult<SnapshotPage>> {
   try {
     const user = await getCurrentUser();
     if (!user) return fail("You need to sign in.");
@@ -113,8 +114,8 @@ export async function listVersions(input: {
     const membership = await requireMembership(parsed.data.documentId, user.id);
     if (!membership) return fail("You don't have access to this document.");
 
-    const versions = await listSnapshots(parsed.data.documentId);
-    return { ok: true, data: versions };
+    const page = await listSnapshots(parsed.data.documentId, parsed.data.offset);
+    return { ok: true, data: page };
   } catch {
     return fail(GENERIC_ERROR);
   }
