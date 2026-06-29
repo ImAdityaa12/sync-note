@@ -48,39 +48,114 @@ Set these environment variables:
 
 ## 3. Realtime relay → Hugging Face Space (Docker)
 
-The repo ships a root **`Dockerfile`** that builds *only* the relay (listening on
-HF's default port 7860) and a **`.dockerignore`**.
+The repo ships a root **`Dockerfile`** that builds *only* the relay (it reuses the
+shared `src/lib` + `src/modules`), runs it via `tsx`, and listens on HF's default
+port **7860**. A `.dockerignore` keeps the build context lean.
 
-1. Create a new **Docker** Space on Hugging Face.
-2. Give its `README.md` the Space frontmatter:
+Do step 1 (the database) first — the relay reads/writes the **same** tables.
 
-   ```yaml
-   ---
-   title: Sync Note Realtime
-   emoji: 🔌
-   colorFrom: indigo
-   colorTo: blue
-   sdk: docker
-   app_port: 7860
-   pinned: false
-   ---
-   ```
+### 3.1 Create the Space
 
-3. Push this repository to the Space's git remote (the `Dockerfile` builds from
-   the repo; `.dockerignore` keeps the context lean).
-4. Add these **Space secrets** (Settings → Variables and secrets):
+1. Sign in at <https://huggingface.co> → top-right **+ New** → **Space**.
+2. **Owner**: your account. **Space name**: e.g. `sync-note-realtime`.
+3. **Select the SDK**: **Docker** → template **Blank**.
+4. **Hardware**: *CPU basic* (free) is enough.
+5. **Visibility**: **Public**. The browser must be able to open the socket, and a
+   *private* Space requires a Hugging Face token to reach — which would break
+   clients. This is safe: the relay is gated by signed tickets + the origin
+   allowlist, not by HF access control (see [`SECURITY.md`](./SECURITY.md)).
+6. Click **Create Space**. HF makes an (empty) git repo with a `README.md` whose
+   frontmatter says `sdk: docker`.
 
-   | Secret | Value |
-   | --- | --- |
-   | `DATABASE_URL` | the **same** Neon string as Vercel |
-   | `BETTER_AUTH_SECRET` | the **same** secret as Vercel |
-   | `REALTIME_ALLOWED_ORIGINS` | your Vercel origin, e.g. `https://sync-note.vercel.app` |
+### 3.2 Get a write token
 
-   `REALTIME_PORT` is already `7860` (set in the Dockerfile); leave it.
+You'll authenticate the git push with a token, not your password:
+<https://huggingface.co/settings/tokens> → **New token** → type **Write** →
+create and copy it. When `git push` prompts, use your **HF username** and paste
+this token as the **password**.
 
-The Space boots `npm run realtime:start`. `GET /health` returns `200 ok`. The
-public URL is `https://<space>.hf.space`; the browser dials it as
-`wss://<space>.hf.space` — that's the value for Vercel's `NEXT_PUBLIC_REALTIME_URL`.
+### 3.3 Push this repo to the Space
+
+HF Spaces are git repositories. From your local clone of **this** project, add the
+Space as a remote and push your branch to the Space's `main` (HF builds from
+`main`). The `Dockerfile` + `.dockerignore` mean only the relay is built, even
+though the whole repo is pushed:
+
+```bash
+# replace <owner> and the space name with yours
+git remote add space https://huggingface.co/spaces/<owner>/sync-note-realtime
+git push space develop:main        # local branch : Space's main
+```
+
+### 3.4 Confirm the Space's Docker config
+
+HF reads the Space config from the **frontmatter of `README.md`**, and pushing
+this repo overwrote that README with the project one (no frontmatter). Fix it
+**in the Space** (this does not touch your GitHub repo): open the Space →
+**Files** → `README.md` → **edit** (pencil) → make sure it *starts* with:
+
+```yaml
+---
+title: Sync Note Realtime
+emoji: 🔌
+colorFrom: indigo
+colorTo: blue
+sdk: docker
+app_port: 7860
+pinned: false
+---
+```
+
+Leave the rest of the file below it. **Commit changes to main** — that triggers a
+build. (`app_port: 7860` matches the Dockerfile's `REALTIME_PORT`.)
+
+> Prefer not to edit it in the UI? Instead push to a clean Space repo: `git clone`
+> the empty Space, copy in `Dockerfile`, `.dockerignore`, `package.json`,
+> `package-lock.json`, `tsconfig.json`, `src/`, `realtime/`, prepend the
+> frontmatter above to its `README.md`, then commit + push.
+
+### 3.5 Add the Space secrets
+
+Space → **Settings** → **Variables and secrets** → **New secret**, three of them:
+
+| Secret | Value |
+| --- | --- |
+| `DATABASE_URL` | the **same** Neon connection string as Vercel |
+| `BETTER_AUTH_SECRET` | the **same** value as Vercel (ticket verification depends on it) |
+| `REALTIME_ALLOWED_ORIGINS` | your Vercel origin only, e.g. `https://sync-note.vercel.app` |
+
+Don't set `REALTIME_PORT` (the Dockerfile pins it to `7860`) and don't set
+`NEXT_PUBLIC_REALTIME_URL` here — that one lives on **Vercel**. After adding
+secrets, use **Settings → Factory rebuild** so the running container picks them up.
+
+### 3.6 Watch the build and get the URL
+
+- The Space's **Logs** tab streams the Docker build, then the runtime. Success
+  looks like `[realtime] listening on :7860`, and the Space badge flips to
+  **Running**.
+- The public URL is `https://<owner>-<space-name>.hf.space` (lowercase; any
+  non-alphanumeric character in the names becomes `-`). For owner `imadityaa12`
+  and space `sync-note-realtime` that's
+  `https://imadityaa12-sync-note-realtime.hf.space`.
+- Health check: opening that URL (or `…/health`) returns plain `ok`.
+
+### 3.7 Wire it back to Vercel
+
+The browser dials the **same host over `wss://`**. Set, on Vercel (Project →
+Settings → Environment Variables):
+
+```
+NEXT_PUBLIC_REALTIME_URL = wss://<owner>-<space-name>.hf.space
+```
+
+`NEXT_PUBLIC_*` is inlined at build time, so **redeploy the Vercel app** after
+setting it. Confirm `REALTIME_ALLOWED_ORIGINS` on the Space exactly matches your
+Vercel origin (scheme + host, no trailing slash).
+
+> **Free-tier note:** an idle free Space may pause; the first connection wakes it
+> (a few seconds of cold start) while the app keeps working over the HTTP-poll
+> fallback, then live cursors resume once the socket is up. For always-on, use a
+> paid Space tier.
 
 ## 4. Verify the two deploys talk
 
