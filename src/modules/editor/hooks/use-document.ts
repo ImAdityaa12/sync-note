@@ -15,6 +15,7 @@ import { SyncEngine } from "@/lib/sync/engine";
 import { RealtimeClient } from "@/lib/sync/realtime";
 import type { SyncStatus } from "@/lib/sync/status";
 import { diffText } from "@/modules/editor/lib/text-diff";
+import { restoreToText } from "@/modules/versions/lib/restore";
 
 export type LocalSaveStatus = "loading" | "saving" | "saved";
 
@@ -175,6 +176,43 @@ export function useDocument(docId: string, canEdit: boolean) {
     [flush]
   );
 
+  /**
+   * Restore a saved version as forward CRDT ops (never a destructive overwrite).
+   * It runs through the exact same path as a keystroke — diff → ops → broadcast →
+   * oplog → persist — so a peer editing concurrently still converges. Returns
+   * once the restore is durably queued.
+   */
+  const restore = useCallback(
+    async (text: string) => {
+      const rga = rgaRef.current;
+      if (!rga) return;
+
+      // Land any debounced edits first, so the restore diffs against a settled
+      // document instead of racing a pending flush.
+      if (timerRef.current) {
+        clearTimeout(timerRef.current);
+        timerRef.current = null;
+      }
+      await flush();
+
+      const ops = restoreToText(rga, text);
+      if (ops.length === 0) return;
+
+      setContent(rga.toString());
+      setStatus("saving");
+      realtimeRef.current?.sendOps(ops); // broadcast live; durability handled below
+      try {
+        await appendOps(docId, ops);
+        await persist();
+        setStatus("saved");
+        engineRef.current?.notifyLocalChange(); // kick off a push
+      } catch {
+        // Best-effort: state stays in memory and retries on the next edit/sync.
+      }
+    },
+    [docId, flush, persist]
+  );
+
   useEffect(() => {
     function onVisibility() {
       if (document.visibilityState === "hidden") void flush();
@@ -192,5 +230,14 @@ export function useDocument(docId: string, canEdit: boolean) {
     realtimeRef.current?.sendCursor(anchor, head);
   }, []);
 
-  return { content, onChange, status, syncStatus, peers, live, reportCursor };
+  return {
+    content,
+    onChange,
+    restore,
+    status,
+    syncStatus,
+    peers,
+    live,
+    reportCursor,
+  };
 }
