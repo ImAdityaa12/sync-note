@@ -2,6 +2,7 @@
 
 import { useCallback, useDeferredValue, useLayoutEffect, useRef } from "react";
 
+import { AiAssistant } from "@/modules/ai/ui/components/ai-assistant";
 import { useDocument } from "@/modules/editor/hooks/use-document";
 import { VersionHistory } from "@/modules/versions/ui/components/version-history";
 
@@ -65,12 +66,15 @@ export function MarkdownEditor({
             canEdit={canEdit}
           />
           {!loading && (
-            <VersionHistory
-              docId={docId}
-              canEdit={canEdit}
-              captureVersion={captureVersion}
-              onRestore={restore}
-            />
+            <>
+              <AiAssistant docId={docId} canEdit={canEdit} content={content} />
+              <VersionHistory
+                docId={docId}
+                canEdit={canEdit}
+                captureVersion={captureVersion}
+                onRestore={restore}
+              />
+            </>
           )}
         </div>
       </div>

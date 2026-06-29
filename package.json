@@ -19,7 +19,9 @@
     "db:studio": "drizzle-kit studio"
   },
   "dependencies": {
+    "@ai-sdk/groq": "^4.0.1",
     "@neondatabase/serverless": "^1.1.0",
+    "ai": "^7.0.4",
     "better-auth": "^1.6.22",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
