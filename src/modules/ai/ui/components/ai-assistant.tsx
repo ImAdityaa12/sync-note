@@ -23,6 +23,7 @@ import {
 } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
+import { sanitizeTitle } from "@/modules/ai/lib/sanitize-title";
 import { MAX_AI_QUESTION_CHARS } from "@/modules/ai/schema";
 import { useAiTask } from "@/modules/ai/ui/hooks/use-ai-task";
 import { renameDocument } from "@/modules/documents/server/actions";
@@ -53,6 +54,7 @@ export function AiAssistant({
   const [open, setOpen] = useState(false);
   const [question, setQuestion] = useState("");
   const [applied, setApplied] = useState(false);
+  const [applyError, setApplyError] = useState<string | null>(null);
   const [applying, startApply] = useTransition();
 
   const { task, output, running, error, run, stop } = useAiTask(docId);
@@ -62,6 +64,7 @@ export function AiAssistant({
     stop();
     setQuestion("");
     setApplied(false);
+    setApplyError(null);
   }
 
   function onAsk(event: React.FormEvent<HTMLFormElement>) {
@@ -73,13 +76,16 @@ export function AiAssistant({
   }
 
   function applyTitle() {
-    const title = output.trim();
+    const title = sanitizeTitle(output);
     if (!title) return;
+    setApplyError(null);
     startApply(async () => {
       const result = await renameDocument({ documentId: docId, title });
       if (result.ok) {
         setApplied(true);
         router.refresh();
+      } else {
+        setApplyError(result.error);
       }
     });
   }
@@ -204,25 +210,30 @@ export function AiAssistant({
             )}
 
             {task === "title" && !running && output.trim() && canEdit && (
-              <Button
-                type="button"
-                size="sm"
-                variant={applied ? "outline" : "default"}
-                disabled={applying || applied}
-                onClick={applyTitle}
-              >
-                {applied ? (
-                  <>
-                    <Check className="size-4" />
-                    Applied
-                  </>
-                ) : (
-                  <>
-                    {applying && <Loader2 className="size-4 animate-spin" />}
-                    Apply as title
-                  </>
+              <div className="space-y-1.5">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant={applied ? "outline" : "default"}
+                  disabled={applying || applied}
+                  onClick={applyTitle}
+                >
+                  {applied ? (
+                    <>
+                      <Check className="size-4" />
+                      Applied
+                    </>
+                  ) : (
+                    <>
+                      {applying && <Loader2 className="size-4 animate-spin" />}
+                      Apply as title
+                    </>
+                  )}
+                </Button>
+                {applyError && (
+                  <p className="text-sm text-destructive">{applyError}</p>
                 )}
-              </Button>
+              </div>
             )}
           </div>
         )}

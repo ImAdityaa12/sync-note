@@ -1,7 +1,7 @@
 import "server-only";
 
 import { groq } from "@ai-sdk/groq";
-import { streamText } from "ai";
+import { createTextStreamResponse, streamText } from "ai";
 
 import type { AiTaskInput } from "@/modules/ai/schema";
 
@@ -63,7 +63,7 @@ function plan(input: AiTaskInput): Plan {
           "text: 3 to 6 words, in Title Case, with no surrounding quotes and no " +
           "trailing punctuation.",
         prompt: `Suggest a title for this document:\n\n${input.content}`,
-        maxOutputTokens: 24,
+        maxOutputTokens: 32,
         temperature: 0.5,
       };
   }
@@ -73,6 +73,11 @@ function plan(input: AiTaskInput): Plan {
  * Stream a task's response as a `text/plain` HTTP stream. `signal` is the
  * request's abort signal, so a client disconnect cancels the upstream LLM call
  * (no wasted tokens).
+ *
+ * `streamText` deliberately does NOT throw on a mid-stream provider failure (the
+ * 200 response has already begun) — it routes the error to `onError` and closes
+ * the text stream. Without `onError` the failure would vanish silently, so we log
+ * it server-side; the client treats an empty stream as a failed generation.
  */
 export function streamAiTask(input: AiTaskInput, signal: AbortSignal): Response {
   const { model, system, prompt, maxOutputTokens, temperature } = plan(input);
@@ -83,6 +88,11 @@ export function streamAiTask(input: AiTaskInput, signal: AbortSignal): Response 
     maxOutputTokens,
     temperature,
     abortSignal: signal,
+    onError: ({ error }) => {
+      console.error("[ai] generation failed:", error);
+    },
   });
-  return result.toTextStreamResponse();
+  // `toTextStreamResponse()` is deprecated in ai@7; the standalone helper over
+  // `result.textStream` is the supported path.
+  return createTextStreamResponse({ stream: result.textStream });
 }

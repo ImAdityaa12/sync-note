@@ -17,7 +17,10 @@ import {
  * allocating, then zod-validate. The request's abort signal is forwarded to the
  * model so a client disconnect cancels the generation.
  */
-const MAX_BODY_BYTES = 128 * 1024;
+// Generous enough that any schema-valid document (24k chars, which can be far
+// more than 24k *bytes* once non-ASCII content is JSON-escaped) fits without
+// tripping the streaming cap before validation runs.
+const MAX_BODY_BYTES = 256 * 1024;
 const AI_PER_MIN = 20;
 
 export async function POST(
@@ -28,10 +31,6 @@ export async function POST(
 
   const user = await getCurrentUser();
   if (!user) return new Response("Unauthorized", { status: 401 });
-
-  if (!aiConfigured()) {
-    return new Response("AI is not configured", { status: 503 });
-  }
 
   // AI spend is per-user, not per-document — one bucket bounds a user's total
   // generation rate across every document they touch.
@@ -52,6 +51,12 @@ export async function POST(
   // Viewers may read; non-members get an indistinguishable 404.
   const membership = await requireMembership(documentId, user.id, "viewer");
   if (!membership) return new Response("Not found", { status: 404 });
+
+  // Checked *after* membership so a non-member can't probe whether the server
+  // has AI configured (they get a 404 first, like any other document detail).
+  if (!aiConfigured()) {
+    return new Response("AI is not configured", { status: 503 });
+  }
 
   let body: unknown;
   try {
