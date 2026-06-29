@@ -1,3 +1,13 @@
+---
+title: Sync Note Realtime
+emoji: 🔌
+colorFrom: indigo
+colorTo: blue
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # sync-note
 
 A **local-first, collaborative markdown editor**. Open, edit, and close documents
