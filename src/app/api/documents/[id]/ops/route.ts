@@ -1,15 +1,13 @@
-import { and, asc, eq, gt, max } from "drizzle-orm";
 import { z } from "zod";
 
-import { db } from "@/db";
-import { documentOps } from "@/db/schema";
-import { opSchema, type Op } from "@/lib/crdt/codec";
+import { opSchema } from "@/lib/crdt/codec";
 import { PayloadTooLargeError, readJsonWithLimit } from "@/lib/http/read-json";
 import { rateLimit } from "@/lib/rate-limit";
 import {
   getCurrentUser,
   requireMembership,
 } from "@/modules/documents/server/membership";
+import { persistOps, pullOpsSince } from "@/modules/documents/server/ops-store";
 
 /**
  * Document op-sync endpoint — the durable HTTP transport behind the background
@@ -34,34 +32,11 @@ const pushSchema = z.object({
   ops: z.array(opSchema).max(MAX_OPS_PER_PUSH),
 });
 
-/**
- * Idempotency key: inserts key on the new node id; deletes on the target
- * (namespaced). NB: clients self-assign op ids, so a malicious *editor* could
- * pre-claim an id to drop another client's future op — an accepted trust
- * assumption (editors are trusted collaborators), documented in the threat model.
- */
-function opKey(op: Op): string {
-  const base = `${op.id.counter}@${op.id.site}`;
-  return op.type === "insert" ? base : `del:${base}`;
-}
-
 function tooManyRequests(retryAfter: number): Response {
   return new Response("Too many requests", {
     status: 429,
     headers: { "retry-after": String(retryAfter) },
   });
-}
-
-function jsonByteSize(value: unknown): number {
-  return new TextEncoder().encode(JSON.stringify(value)).length;
-}
-
-async function latestSeqFor(documentId: string): Promise<number> {
-  const [row] = await db
-    .select({ seq: max(documentOps.seq) })
-    .from(documentOps)
-    .where(eq(documentOps.documentId, documentId));
-  return row?.seq ?? 0;
 }
 
 export async function POST(
@@ -103,20 +78,10 @@ export async function POST(
     return new Response("Invalid ops", { status: 422 });
   }
 
-  const { ops } = parsed.data;
-  if (ops.length > 0) {
-    const rows = ops.map((op) => ({
-      id: opKey(op),
-      documentId,
-      authorId: user.id,
-      op,
-      byteSize: jsonByteSize(op),
-    }));
-    // Idempotent: an op already stored (same key) is ignored.
-    await db.insert(documentOps).values(rows).onConflictDoNothing();
-  }
-
-  return Response.json({ ok: true, latestSeq: await latestSeqFor(documentId) });
+  // Idempotent persist (shared with the realtime relay): re-pushing an op is a
+  // no-op, so an interrupted sync can retry without duplicating.
+  const latestSeq = await persistOps(documentId, user.id, parsed.data.ops);
+  return Response.json({ ok: true, latestSeq });
 }
 
 export async function GET(
@@ -142,17 +107,5 @@ export async function GET(
     Math.max(1, Number(url.searchParams.get("limit") ?? String(MAX_PULL)) || MAX_PULL)
   );
 
-  const rows = await db
-    .select({ seq: documentOps.seq, op: documentOps.op })
-    .from(documentOps)
-    .where(and(eq(documentOps.documentId, documentId), gt(documentOps.seq, since)))
-    .orderBy(asc(documentOps.seq))
-    .limit(limit);
-
-  const latestSeq = rows.length > 0 ? rows[rows.length - 1].seq : since;
-  return Response.json({
-    ops: rows.map((r) => r.op as Op),
-    latestSeq,
-    hasMore: rows.length === limit,
-  });
+  return Response.json(await pullOpsSince(documentId, since, limit));
 }

@@ -3,7 +3,6 @@ import {
   getCursor,
   getPendingOps,
   pruneOps,
-  saveSnapshot,
   setCursor,
 } from "@/lib/local/repo";
 
@@ -18,6 +17,12 @@ interface SyncEngineOptions {
   /** Called after remote ops change the document, so the editor can re-render. */
   onRemoteApplied: () => void;
   onStatus: (status: SyncStatus) => void;
+  /**
+   * Durably persist the current CRDT snapshot. Must be a single serialized
+   * writer shared with the editor (the realtime path and local edits persist
+   * through the same function), so a stale write can never clobber a newer one.
+   */
+  persist: () => Promise<void>;
   /** Override the transport (tests inject an in-memory server). */
   transport?: SyncTransport;
 }
@@ -128,18 +133,15 @@ export class SyncEngine {
           since
         );
         if (ops.length > 0) {
-          let appliedNew = false;
           for (const op of ops) {
-            if (rga.apply(op)) appliedNew = true;
+            if (rga.apply(op)) changed = true;
           }
-          // Only persist when a genuinely new op landed — own ops pulled back
-          // are already in the snapshot, so skip the redundant write.
-          if (appliedNew) {
-            changed = true;
-            // Persist BEFORE advancing the cursor — a reload must never skip
-            // ops that aren't yet in the snapshot.
-            await saveSnapshot(docId, rga.snapshot());
-          }
+          // Persist BEFORE advancing the cursor whenever we pulled ops — even
+          // ops already applied live over the socket, which aren't yet in the
+          // snapshot. The cursor is the "durably snapshotted" watermark, so it
+          // must never move past ops the snapshot doesn't reflect, or a reload
+          // would load stale content and never re-pull them.
+          await this.opts.persist();
         }
         if (latestSeq > since) {
           await setCursor(docId, latestSeq);

@@ -8,6 +8,7 @@ import {
   appendOps,
   getPendingOps,
   loadDocumentRecord,
+  saveSnapshot,
 } from "@/lib/local/repo";
 
 import { SyncEngine } from "./engine";
@@ -72,6 +73,7 @@ function engineFor(
     transport,
     onRemoteApplied: noop,
     onStatus: noop,
+    persist: () => saveSnapshot(docId, rga.snapshot()),
   });
 }
 
@@ -109,6 +111,27 @@ describe("SyncEngine", () => {
     expect(RGA.fromSnapshot(record!.crdtState!, "C").toString()).toBe(
       "remote text"
     );
+  });
+
+  it("persists ops already applied live, before advancing the cursor", async () => {
+    const docId = "doc-ws-first";
+    const { transport } = makeServer();
+
+    // A remote device publishes ops.
+    const remote = new RGA("X");
+    await transport.push(docId, remote.insertAt(0, "live"));
+
+    // The realtime path applies them to the in-memory CRDT *before* the engine
+    // pulls, so the engine sees them as already-applied (no new op) — yet it must
+    // still persist them or a reload (after the cursor advances) would skip them.
+    const local = new RGA("C");
+    for (const e of (await transport.pull(docId, 0)).ops) local.apply(e);
+    expect(local.toString()).toBe("live");
+
+    await engineFor(docId, local, transport).sync();
+
+    const record = await loadDocumentRecord(docId);
+    expect(RGA.fromSnapshot(record!.crdtState!, "C").toString()).toBe("live");
   });
 
   it("never loses offline edits — all queued ops reach the server on reconnect", async () => {

@@ -14,6 +14,13 @@ export interface RGASnapshot {
   clock: number;
   nodes: { id: Id; value: string; originLeft: Id | null }[];
   deleted: string[];
+  /**
+   * Inserts still waiting for their origin to arrive. Persisted so a reload
+   * doesn't silently drop them — otherwise an op buffered here (and already past
+   * the pull cursor) would be lost forever. Optional for back-compat with older
+   * snapshots written before this field existed.
+   */
+  pending?: InsertOp[];
 }
 
 /**
@@ -168,6 +175,8 @@ export class RGA {
   // --------------------------------------------------------------------------
 
   snapshot(): RGASnapshot {
+    const pending: InsertOp[] = [];
+    for (const queue of this.pending.values()) pending.push(...queue);
     return {
       clock: this.clock,
       nodes: this.nodes.map((n) => ({
@@ -176,6 +185,7 @@ export class RGA {
         originLeft: n.originLeft,
       })),
       deleted: [...this.deleted],
+      pending,
     };
   }
 
@@ -194,6 +204,9 @@ export class RGA {
     }));
     for (const node of rga.nodes) rga.present.set(idKey(node.id), node);
     rga.deleted = new Set(snapshot.deleted);
+    // Re-queue any inserts that were still waiting on their origin. Re-applying
+    // either re-buffers them or integrates them if their origin is now present.
+    for (const op of snapshot.pending ?? []) rga.apply(op);
     return rga;
   }
 
