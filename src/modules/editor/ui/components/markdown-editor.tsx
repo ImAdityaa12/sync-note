@@ -3,6 +3,7 @@
 import { useCallback, useDeferredValue, useLayoutEffect, useRef } from "react";
 
 import { useDocument } from "@/modules/editor/hooks/use-document";
+import { VersionHistory } from "@/modules/versions/ui/components/version-history";
 
 import { ConnectionStatus } from "./connection-status";
 import { MarkdownPreview } from "./markdown-preview";
@@ -16,8 +17,16 @@ export function MarkdownEditor({
   docId: string;
   canEdit: boolean;
 }) {
-  const { content, onChange, status, syncStatus, peers, reportCursor } =
-    useDocument(docId, canEdit);
+  const {
+    content,
+    onChange,
+    restore,
+    captureVersion,
+    status,
+    syncStatus,
+    peers,
+    reportCursor,
+  } = useDocument(docId, canEdit);
   // The preview lags behind during rapid typing so re-parsing never blocks keys.
   const deferredContent = useDeferredValue(content);
 
@@ -55,6 +64,14 @@ export function MarkdownEditor({
             saveStatus={status}
             canEdit={canEdit}
           />
+          {!loading && (
+            <VersionHistory
+              docId={docId}
+              canEdit={canEdit}
+              captureVersion={captureVersion}
+              onRestore={restore}
+            />
+          )}
         </div>
       </div>
 
