@@ -43,12 +43,13 @@ import type { VersionSummary } from "@/modules/versions/types";
 export function VersionHistory({
   docId,
   canEdit,
-  currentContent,
+  captureVersion,
   onRestore,
 }: {
   docId: string;
   canEdit: boolean;
-  currentContent: string;
+  /** Snapshot the live document (content + the cursor it reflects) at save time. */
+  captureVersion: () => Promise<{ content: string; baseSeq: number }>;
   onRestore: (text: string) => Promise<void>;
 }) {
   const [open, setOpen] = useState(false);
@@ -93,10 +94,12 @@ export function VersionHistory({
     event.preventDefault();
     setSaveError(null);
     startSave(async () => {
+      const { content, baseSeq } = await captureVersion();
       const result = await saveVersion({
         documentId: docId,
         label: label.trim() || undefined,
-        content: currentContent,
+        content,
+        baseSeq,
       });
       if (result.ok) {
         setLabel("");

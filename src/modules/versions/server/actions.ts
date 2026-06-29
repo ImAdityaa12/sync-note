@@ -41,29 +41,45 @@ export async function saveVersion(input: {
   documentId: string;
   label?: string;
   content: string;
+  baseSeq?: number;
 }): Promise<ActionResult<{ id: string }>> {
   const user = await getCurrentUser();
   if (!user) return fail("You need to sign in.");
+
+  // Resolve the document id cheaply so we can rate-limit and authorize *before*
+  // validating the (potentially large) content body.
+  const documentId =
+    typeof input?.documentId === "string" ? input.documentId : "";
+  if (!documentId) return fail("Missing document.");
+
+  // Per-(user, document) so saving in one document can't throttle another, and
+  // an inaccessible doc can only exhaust its own bucket — mirrors the ops route.
+  const rl = rateLimit(
+    `version:save:${user.id}:${documentId}`,
+    SAVE_PER_MIN,
+    60_000
+  );
+  if (!rl.ok) return fail("You're saving versions too quickly. Try again shortly.");
+
+  // Editors and owners may snapshot; viewers cannot. Authorize before touching
+  // the body so an unauthorized caller never drives content validation.
+  const membership = await requireMembership(documentId, user.id, "editor");
+  if (!membership) return fail("You can't save versions of this document.");
 
   const parsed = saveVersionSchema.safeParse(input);
   if (!parsed.success) {
     return fail(parsed.error.issues[0]?.message ?? "Couldn't save this version.");
   }
-  const { documentId, label, content } = parsed.data;
+  const { label, content, baseSeq } = parsed.data;
 
-  const rl = rateLimit(`version:save:${user.id}`, SAVE_PER_MIN, 60_000);
-  if (!rl.ok) return fail("You're saving versions too quickly. Try again shortly.");
+  // `uptoSeq` must reflect what `content` actually covers: the client's pull
+  // cursor (server ops it had applied). Clamp to the server's latest so a stale
+  // or hostile cursor can't over-claim — under-claiming is the safe direction
+  // for compaction (we keep more ops, never prune ones the snapshot misses).
+  const serverLatest = await latestSeqFor(documentId);
+  const uptoSeq = Math.max(0, Math.min(baseSeq ?? 0, serverLatest));
 
-  // Editors and owners may snapshot; viewers cannot.
-  const membership = await requireMembership(documentId, user.id, "editor");
-  if (!membership) return fail("You can't save versions of this document.");
-
-  // Record the server's latest seq as the snapshot's cursor. Any local edits not
-  // yet pushed sit *above* this watermark, so it never over-claims coverage —
-  // the safe direction for compaction (we'd keep more ops, never prune too many).
-  const uptoSeq = await latestSeqFor(documentId);
-
-  await createSnapshot({
+  const id = await createSnapshot({
     documentId,
     createdBy: user.id,
     label: label && label.length > 0 ? label : null,
@@ -71,7 +87,7 @@ export async function saveVersion(input: {
     uptoSeq,
   });
 
-  return { ok: true, data: { id: documentId } };
+  return { ok: true, data: { id } };
 }
 
 export async function listVersions(input: {

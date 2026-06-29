@@ -17,8 +17,16 @@ export function MarkdownEditor({
   docId: string;
   canEdit: boolean;
 }) {
-  const { content, onChange, restore, status, syncStatus, peers, reportCursor } =
-    useDocument(docId, canEdit);
+  const {
+    content,
+    onChange,
+    restore,
+    captureVersion,
+    status,
+    syncStatus,
+    peers,
+    reportCursor,
+  } = useDocument(docId, canEdit);
   // The preview lags behind during rapid typing so re-parsing never blocks keys.
   const deferredContent = useDeferredValue(content);
 
@@ -60,7 +68,7 @@ export function MarkdownEditor({
             <VersionHistory
               docId={docId}
               canEdit={canEdit}
-              currentContent={content}
+              captureVersion={captureVersion}
               onRestore={restore}
             />
           )}

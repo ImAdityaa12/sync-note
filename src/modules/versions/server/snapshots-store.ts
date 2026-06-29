@@ -17,25 +17,36 @@ import type { SnapshotState, VersionSummary } from "@/modules/versions/types";
  * Tenant scoping is the caller's job — every entry point in `actions.ts` funnels
  * through `requireMembership` first, exactly like the documents domain.
  */
+/** Most recent snapshots returned to the timeline (bounds an unbounded log). */
+export const MAX_VERSION_LIST = 100;
+
+/** Persist a snapshot and return its generated id. */
 export async function createSnapshot(input: {
   documentId: string;
   createdBy: string;
   label: string | null;
   content: string;
   uptoSeq: number;
-}): Promise<void> {
+}): Promise<string> {
+  const id = crypto.randomUUID();
   const state: SnapshotState = { content: input.content };
   await db.insert(documentSnapshots).values({
-    id: crypto.randomUUID(),
+    id,
     documentId: input.documentId,
     createdBy: input.createdBy,
     label: input.label,
     state,
     uptoSeq: input.uptoSeq,
   });
+  return id;
 }
 
-/** Snapshots for a document, newest first, with author identity for the timeline. */
+/**
+ * Snapshots for a document, newest first, with author identity for the timeline.
+ * Capped at `MAX_VERSION_LIST`: the op/snapshot log grows without bound, so the
+ * dialog never ships (or renders) an unbounded set. `id` is a stable secondary
+ * sort key so same-timestamp versions don't reorder between reloads.
+ */
 export async function listSnapshots(
   documentId: string
 ): Promise<VersionSummary[]> {
@@ -52,7 +63,8 @@ export async function listSnapshots(
     .from(documentSnapshots)
     .innerJoin(user, eq(user.id, documentSnapshots.createdBy))
     .where(eq(documentSnapshots.documentId, documentId))
-    .orderBy(desc(documentSnapshots.createdAt));
+    .orderBy(desc(documentSnapshots.createdAt), desc(documentSnapshots.id))
+    .limit(MAX_VERSION_LIST);
 
   return rows;
 }

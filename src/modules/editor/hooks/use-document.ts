@@ -7,6 +7,7 @@ import { RGA } from "@/lib/crdt/rga";
 import type { Peer } from "@/lib/realtime/protocol";
 import {
   appendOps,
+  getCursor,
   getOrCreateSiteId,
   loadDocumentRecord,
   saveSnapshot,
@@ -45,6 +46,9 @@ export function useDocument(docId: string, canEdit: boolean) {
   const pendingOpsRef = useRef<Op[]>([]);
   const dirtyRef = useRef(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // The currently-running flush, so a caller (e.g. restore) can await a flush
+  // that's already mid-write instead of racing past it.
+  const flushPromiseRef = useRef<Promise<void>>(Promise.resolve());
 
   // Single serialized snapshot writer. Local edits, pulled remote ops, and the
   // realtime path all persist through this one chain, so a stale write started
@@ -133,22 +137,40 @@ export function useDocument(docId: string, canEdit: boolean) {
     };
   }, [docId, canEdit, persist]);
 
-  const flush = useCallback(async () => {
+  // Durability tail shared by every local-write path (debounced flush + restore):
+  // broadcast live, append to the durable oplog, persist the snapshot, then kick
+  // a push. One copy so the broadcast/persist ordering can't drift between paths.
+  const commitOps = useCallback(
+    async (ops: Op[]) => {
+      if (ops.length === 0) return;
+      realtimeRef.current?.sendOps(ops); // broadcast live; durability below
+      try {
+        await appendOps(docId, ops);
+        await persist();
+        setStatus("saved");
+        engineRef.current?.notifyLocalChange(); // kick off a push
+      } catch {
+        // Best-effort: state stays in memory and retries on the next edit/sync.
+      }
+    },
+    [docId, persist]
+  );
+
+  const flush = useCallback(async (): Promise<void> => {
     const rga = rgaRef.current;
-    if (!rga || !dirtyRef.current) return;
+    // Not dirty: a flush may already be mid-write (the debounce just fired), so
+    // await it rather than returning before its durable write completes.
+    if (!rga || !dirtyRef.current) {
+      await flushPromiseRef.current;
+      return;
+    }
     dirtyRef.current = false;
     const ops = pendingOpsRef.current;
     pendingOpsRef.current = [];
-    realtimeRef.current?.sendOps(ops); // broadcast live; durability handled below
-    try {
-      await appendOps(docId, ops);
-      await persist();
-      setStatus("saved");
-      engineRef.current?.notifyLocalChange(); // kick off a push
-    } catch {
-      // Best-effort: state stays in memory and retries on the next edit.
-    }
-  }, [docId, persist]);
+    const done = commitOps(ops);
+    flushPromiseRef.current = done;
+    await done;
+  }, [commitOps]);
 
   const onChange = useCallback(
     (nextText: string) => {
@@ -184,6 +206,10 @@ export function useDocument(docId: string, canEdit: boolean) {
    */
   const restore = useCallback(
     async (text: string) => {
+      // Restore writes ops; viewers never push (UI hides it, server re-checks,
+      // and the engine's canPush is false). Guard here too so a viewer can't
+      // accumulate ops in a local oplog that will never be pushed or pruned.
+      if (!canEdit) return;
       const rga = rgaRef.current;
       if (!rga) return;
 
@@ -200,18 +226,22 @@ export function useDocument(docId: string, canEdit: boolean) {
 
       setContent(rga.toString());
       setStatus("saving");
-      realtimeRef.current?.sendOps(ops); // broadcast live; durability handled below
-      try {
-        await appendOps(docId, ops);
-        await persist();
-        setStatus("saved");
-        engineRef.current?.notifyLocalChange(); // kick off a push
-      } catch {
-        // Best-effort: state stays in memory and retries on the next edit/sync.
-      }
+      await commitOps(ops);
     },
-    [docId, flush, persist]
+    [canEdit, flush, commitOps]
   );
+
+  /**
+   * Capture the current document for a version snapshot: the live materialized
+   * text together with the pull cursor it reflects. Read as a pair so the saved
+   * content and its `uptoSeq` watermark stay consistent.
+   */
+  const captureVersion = useCallback(async () => {
+    const rga = rgaRef.current;
+    const content = rga ? rga.toString() : "";
+    const baseSeq = await getCursor(docId);
+    return { content, baseSeq };
+  }, [docId]);
 
   useEffect(() => {
     function onVisibility() {
@@ -234,6 +264,7 @@ export function useDocument(docId: string, canEdit: boolean) {
     content,
     onChange,
     restore,
+    captureVersion,
     status,
     syncStatus,
     peers,
