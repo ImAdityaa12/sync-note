@@ -1,36 +1,128 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# sync-note
 
-## Getting Started
+A **local-first, collaborative markdown editor**. Open, edit, and close documents
+with zero network latency — the browser is the source of truth. Edits sync to the
+server in the background, merge deterministically with other collaborators' edits
+(no data loss) over a real-time channel, and every document keeps a navigable
+version history you can time-travel through.
 
-First, run the development server:
+It is deliberately **not** a CRUD app. The focus is the distributed-systems work:
+client-side storage, a background sync engine, a hand-built conflict-free merge,
+live collaboration, and safe version restore.
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+## The hard parts (and how they're solved)
+
+| Problem | Approach |
+| --- | --- |
+| **Browser memory management** | Documents live in IndexedDB (`idb`); a durable op-log + version snapshots with a documented pruning/compaction path. Merge work never blocks the editor thread. |
+| **State-synchronization races** | A background `SyncEngine` drains a durable oplog → push (idempotent) → prune → pull → merge → persist → advance cursor, serialized and offline-safe. Interrupted/partial syncs replay without dupes or loss. |
+| **Conflict-free merging** | A **hand-built CRDT** — an RGA (replicated growable array) over the text sequence, in `src/lib/crdt`. Property-tested for convergence, idempotency, and commutativity (1000-run randomized suites). No merge library. |
+| **The Google-Docs feel** | A self-hosted `ws` relay broadcasts ops + awareness for live co-editing, **remote cursors**, and **presence avatars** on top of the CRDT. |
+
+## Architecture
+
+```
+Browser (source of truth)
+  RGA (in-memory)  ──keystroke──►  diff → ops → apply (instant repaint)
+       │                                  │
+       │                                  ├─► IndexedDB oplog (durable, debounced)
+       │                                  └─► ws relay (live broadcast to peers)
+       ▼
+  SyncEngine ──HTTP──►  /api/documents/[id]/ops  ──►  Postgres (durable op log)
+   (push/pull, offline-safe, idempotent)                    ▲
+                                                            │
+  ws relay (separate Node process) ──persists ops──────────┘
+   (live accelerator: cursors + presence; durability stays in the HTTP path)
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+- **Local store = source of truth.** Reads/edits hit IndexedDB first; the network
+  never blocks open/edit/close. Fully usable offline.
+- **Sync engine** reconciles both directions on reconnect without overwriting
+  offline work; the pull cursor is only advanced *after* the merged snapshot is
+  persisted, so a reload is always consistent.
+- **Versions** capture a snapshot + cursor; **restore emits forward CRDT ops**
+  (never a destructive overwrite), so collaborators editing concurrently converge.
+- **AI** add-ons (summary / ask / title) stream from Groq, authenticated and
+  rate-limited, and write no document state.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Tech stack
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+- **Next.js 16** (App Router) + **React 19** + **TypeScript** (strict)
+- **Tailwind CSS v4**, shadcn / radix-ui
+- **PostgreSQL** (Neon) via **Drizzle**, strict tenant scoping
+- **Better Auth** (email + Google/GitHub OAuth)
+- Custom **CRDT** (`src/lib/crdt`) + self-hosted **`ws`** relay (`realtime/`)
+- **AI-SDK** + **Groq** for assistive features
+- **Vitest** + **fast-check** for unit/property tests
 
-## Learn More
+## Getting started
 
-To learn more about Next.js, take a look at the following resources:
+```bash
+cp .env.example .env.local      # fill in DATABASE_URL, BETTER_AUTH_SECRET, etc.
+npm install
+npm run db:migrate              # apply Drizzle migrations to your Neon database
+npm run dev                     # app at http://localhost:3000
+npm run realtime:dev            # (separate terminal) live-collab relay on :3001
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+`GROQ_API_KEY` is optional — without it the AI assistant returns a graceful
+"not configured" message and everything else works.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Commands
 
-## Deploy on Vercel
+| Command | What it does |
+| --- | --- |
+| `npm run dev` | App dev server |
+| `npm run realtime:dev` | WebSocket collaboration relay |
+| `npm run build` / `start` | Production build / serve |
+| `npm run lint` / `typecheck` | ESLint / `tsc --noEmit` |
+| `npm test` | Vitest unit + property suite |
+| `npm run realtime:verify` | Live relay harness (auth, presence, cursor relay, viewer-gate, oversized-frame) |
+| `npm run db:generate` / `migrate` / `studio` | Drizzle workflow |
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## Project structure
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+```
+src/
+  lib/
+    crdt/      # the custom RGA CRDT (rga, clock, codec) — the core IP
+    local/     # IndexedDB persistence (documents, oplog, meta)
+    sync/      # client sync engine (push/pull, status, realtime client)
+    realtime/  # shared ws protocol, frame validation, HMAC tickets
+    http/      # streaming body-size guard
+  modules/
+    documents/ # domain: roles, membership funnel, server actions
+    editor/    # editing surface; binds crdt + local + sync
+    versions/  # snapshots + restore-as-forward-ops time travel
+    ai/        # summary / ask / title (Groq, streamed)
+  app/api/     # ops sync, ai, realtime ticket routes
+realtime/      # standalone ws relay (rooms, authz, hardening)
+```
+
+## Security
+
+Multi-tenant with two untrusted sync transports — the security model is written
+up in detail in **[SECURITY.md](./SECURITY.md)**: authentication on every route,
+tenant isolation through a single membership funnel (no existence leaks),
+viewers that can never push state, payload validation with **size caps before
+allocating** (HTTP + WS), rate limiting on every sync endpoint, and WebSocket
+OOM/abuse hardening. The boundary is covered by tests (see that doc).
+
+## Testing
+
+`npm test` runs the Vitest suite: CRDT convergence/idempotency/commutativity
+(property-based, `fast-check`), restore convergence under concurrent edits, the
+sync engine, the HTTP route security boundaries (ops + AI), realtime frame/ticket
+validation, and the streaming body cap.
+
+## Deployment
+
+The Next app deploys to Vercel from `main`; the `realtime/` relay deploys
+separately as a long-running Node service (Railway / Fly) with an origin
+allowlist. Both share `DATABASE_URL` + `BETTER_AUTH_SECRET`; see
+`realtime/README.md`. Developed and run on Node 22.
+
+## Credit
+
+Built by **Aditya** — [GitHub](https://github.com/ImAdityaa12) ·
+[LinkedIn](https://www.linkedin.com/in/imadityaa12)
