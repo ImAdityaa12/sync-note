@@ -1,17 +1,37 @@
 import type { Op } from "@/lib/crdt/codec";
-import type { ClientFrame, Peer, ServerFrame } from "@/lib/realtime/protocol";
+import type {
+  ClientFrame,
+  ErrorCode,
+  Peer,
+  ServerFrame,
+} from "@/lib/realtime/protocol";
 
 interface TicketResponse {
   ticket: string;
   url: string;
 }
 
+/** A batch of remote ops with the seq range it covers (for gap-safe applying). */
+export interface RemoteOpBatch {
+  ops: Op[];
+  /** Room seq before this batch — the client applies only if it equals its cursor. */
+  fromSeq: number;
+  /** Room watermark after this batch (the new cursor on a contiguous apply). */
+  seq: number;
+}
+
 export interface RealtimeClientOptions {
   docId: string;
   /** This replica's CRDT site id, so our cursor correlates with our ops. */
   site: string;
-  /** Remote ops to apply to the local CRDT. */
-  onOps: (ops: Op[]) => void;
+  /** A remote op batch to apply to the local CRDT (gap-checked by the caller). */
+  onOps: (batch: RemoteOpBatch) => void;
+  /** The room watermark from a welcome frame (connect or a backpressure nudge). */
+  onWelcome: (seq: number) => void;
+  /** The server durably persisted our pushed ops up to `seq` — safe to prune. */
+  onAck: (seq: number) => void;
+  /** The server rejected a frame (rate limit, forbidden, server error, …). */
+  onError: (code: ErrorCode) => void;
   /** Latest presence snapshot of the *other* people in the room. */
   onPresence: (peers: Peer[]) => void;
   /** Whether the live socket is currently connected. */
@@ -55,9 +75,18 @@ export class RealtimeClient {
     ws?.close();
   }
 
-  /** Broadcast locally-produced ops to peers (no-op if the socket is down). */
-  sendOps(ops: Op[]): void {
-    if (ops.length > 0) this.send({ t: "op", ops });
+  /** Whether the live socket is currently open (can carry pushes). */
+  get connected(): boolean {
+    return this.ws?.readyState === WebSocket.OPEN;
+  }
+
+  /**
+   * Push locally-produced ops to peers + durable store. Returns whether they were
+   * actually sent; a `false` (socket down) tells the caller to keep them queued.
+   */
+  sendOps(ops: Op[]): boolean {
+    if (ops.length === 0) return false;
+    return this.send({ t: "op", ops });
   }
 
   /**
@@ -90,10 +119,12 @@ export class RealtimeClient {
     this.send({ t: "cursor", anchor: cursor.anchor, head: cursor.head });
   }
 
-  private send(frame: ClientFrame): void {
+  private send(frame: ClientFrame): boolean {
     if (this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(frame));
+      return true;
     }
+    return false;
   }
 
   private async connect(): Promise<void> {
@@ -156,15 +187,22 @@ export class RealtimeClient {
     }
     switch (frame.t) {
       case "welcome":
+        this.opts.onPresence(frame.peers);
+        // welcome carries the room watermark — on connect, and again whenever the
+        // server nudges us after a dropped broadcast — so we can catch up if behind.
+        this.opts.onWelcome(frame.seq);
+        break;
       case "presence":
         this.opts.onPresence(frame.peers);
         break;
       case "op":
-        this.opts.onOps(frame.ops);
+        this.opts.onOps({ ops: frame.ops, fromSeq: frame.fromSeq, seq: frame.seq });
         break;
-      // 'ack' / 'error' are advisory — durability + retries live in the HTTP path.
       case "ack":
+        this.opts.onAck(frame.seq);
+        break;
       case "error":
+        this.opts.onError(frame.code);
         break;
     }
   }

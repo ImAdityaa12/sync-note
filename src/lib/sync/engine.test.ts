@@ -4,12 +4,7 @@ import { describe, expect, it } from "vitest";
 
 import type { Op } from "@/lib/crdt/codec";
 import { RGA } from "@/lib/crdt/rga";
-import {
-  appendOps,
-  getPendingOps,
-  loadDocumentRecord,
-  saveSnapshot,
-} from "@/lib/local/repo";
+import { loadDocumentRecord, saveSnapshot } from "@/lib/local/repo";
 
 import { SyncEngine } from "./engine";
 import type { SyncTransport } from "./transport";
@@ -18,6 +13,9 @@ import type { SyncTransport } from "./transport";
  * In-memory stand-in for the server route: an idempotent op store with a global
  * seq, per document. Acts as the "other side" so a single local client (one fake
  * IndexedDB) can be tested without two clients sharing local state.
+ *
+ * The engine is now **pull-only** — pushing local edits lives in `OutboundQueue`
+ * (see `outbound.test.ts`), so these tests only need the pull side.
  */
 function makeServer() {
   const docs = new Map<string, Map<string, { seq: number; op: Op }>>();
@@ -60,38 +58,18 @@ function makeServer() {
 
 const noop = () => {};
 
-function engineFor(
-  docId: string,
-  rga: RGA,
-  transport: SyncTransport,
-  canPush = true
-) {
+function engineFor(docId: string, rga: RGA, transport: SyncTransport) {
   return new SyncEngine({
     docId,
     rga,
-    canPush,
     transport,
     onRemoteApplied: noop,
-    onStatus: noop,
+    onState: noop,
     persist: () => saveSnapshot(docId, rga.snapshot()),
   });
 }
 
-describe("SyncEngine", () => {
-  it("pushes queued ops and prunes the oplog once acked", async () => {
-    const docId = "doc-push";
-    const { transport } = makeServer();
-
-    const rga = new RGA("A");
-    await appendOps(docId, rga.insertAt(0, "hello"));
-    expect(await getPendingOps(docId)).toHaveLength(5);
-
-    await engineFor(docId, rga, transport).sync();
-
-    expect(await getPendingOps(docId)).toHaveLength(0); // pruned
-    expect((await transport.pull(docId, 0)).ops).toHaveLength(5); // durable on server
-  });
-
+describe("SyncEngine (pull-only catch-up)", () => {
   it("pulls remote ops, converges, and persists them (reload-safe)", async () => {
     const docId = "doc-reload";
     const { transport } = makeServer();
@@ -101,7 +79,7 @@ describe("SyncEngine", () => {
     await transport.push(docId, remote.insertAt(0, "remote text"));
 
     const local = new RGA("C");
-    await engineFor(docId, local, transport).sync();
+    await engineFor(docId, local, transport).catchUp();
     expect(local.toString()).toBe("remote text");
 
     // Simulate a reload: rebuild purely from the persisted snapshot. This fails
@@ -128,55 +106,24 @@ describe("SyncEngine", () => {
     for (const e of (await transport.pull(docId, 0)).ops) local.apply(e);
     expect(local.toString()).toBe("live");
 
-    await engineFor(docId, local, transport).sync();
+    await engineFor(docId, local, transport).catchUp();
 
     const record = await loadDocumentRecord(docId);
     expect(RGA.fromSnapshot(record!.crdtState!, "C").toString()).toBe("live");
   });
 
-  it("never loses offline edits — all queued ops reach the server on reconnect", async () => {
-    const docId = "doc-offline";
+  it("is idempotent across repeated catch-ups — applies each op once", async () => {
+    const docId = "doc-pull-idem";
     const { transport } = makeServer();
 
-    // Edit "offline": queue ops without syncing.
-    const rga = new RGA("A");
-    await appendOps(docId, rga.insertAt(0, "first "));
-    await appendOps(docId, rga.insertAt(rga.length, "second"));
-    expect(await getPendingOps(docId)).toHaveLength(12);
+    const remote = new RGA("X");
+    await transport.push(docId, remote.insertAt(0, "abc"));
 
-    await engineFor(docId, rga, transport).sync(); // reconnect
+    const local = new RGA("C");
+    const engine = engineFor(docId, local, transport);
+    await engine.catchUp();
+    await engine.catchUp(); // re-run must not duplicate or corrupt
 
-    expect(await getPendingOps(docId)).toHaveLength(0);
-    expect((await transport.pull(docId, 0)).ops).toHaveLength(12);
-  });
-
-  it("is idempotent across repeated syncs — no duplicate ops", async () => {
-    const docId = "doc-idem";
-    const { transport } = makeServer();
-
-    const rga = new RGA("A");
-    await appendOps(docId, rga.insertAt(0, "abc"));
-
-    const engine = engineFor(docId, rga, transport);
-    await engine.sync();
-    await engine.sync(); // re-run must not duplicate
-
-    expect(await getPendingOps(docId)).toHaveLength(0);
-    expect((await transport.pull(docId, 0)).ops).toHaveLength(3);
-    expect(rga.toString()).toBe("abc");
-  });
-
-  it("does not push when the client is a viewer (canPush=false)", async () => {
-    const docId = "doc-viewer";
-    const { transport } = makeServer();
-
-    const rga = new RGA("V");
-    await appendOps(docId, rga.insertAt(0, "x"));
-
-    await engineFor(docId, rga, transport, false).sync();
-
-    // Nothing pushed; ops stay queued locally.
-    expect((await transport.pull(docId, 0)).ops).toHaveLength(0);
-    expect(await getPendingOps(docId)).toHaveLength(1);
+    expect(local.toString()).toBe("abc");
   });
 });

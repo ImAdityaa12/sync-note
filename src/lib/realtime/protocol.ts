@@ -65,7 +65,12 @@ export type ErrorCode =
 
 export type ServerFrame =
   | { t: "welcome"; seq: number; peers: Peer[] }
-  | { t: "op"; ops: Op[]; seq: number; from: string }
+  // `fromSeq` is the room's seq *before* this batch; `seq` is the watermark
+  // after it. A client applies the batch only when `fromSeq === its cursor`
+  // (contiguous); a higher `fromSeq` means it missed ops and must catch up over
+  // HTTP. Needed because `document_ops.seq` is a global serial, so a client can't
+  // detect a gap from seq arithmetic alone.
+  | { t: "op"; ops: Op[]; fromSeq: number; seq: number; from: string }
   | { t: "presence"; peers: Peer[] }
   | { t: "ack"; seq: number }
   | { t: "error"; code: ErrorCode };

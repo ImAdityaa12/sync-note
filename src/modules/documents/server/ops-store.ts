@@ -32,16 +32,29 @@ export async function latestSeqFor(documentId: string): Promise<number> {
   return row?.seq ?? 0;
 }
 
+export interface PersistResult {
+  /** Highest seq for the document after the write (the watermark). */
+  latestSeq: number;
+  /**
+   * Highest seq among the rows this call *actually inserted*, or null when every
+   * op was a duplicate (idempotent no-op). The relay broadcasts only on a real
+   * insert and uses this as the frame's `seq`, so a re-pushed batch never emits a
+   * phantom range that would push peers into a needless resync.
+   */
+  insertedSeq: number | null;
+}
+
 /**
  * Idempotently append ops authored by `authorId`. Re-inserting an op with the
  * same key is a no-op, so interrupted or duplicated pushes never double-apply.
- * Returns the document's latest seq after the write.
+ * Returns the document's latest seq plus the seq actually added by this call.
  */
 export async function persistOps(
   documentId: string,
   authorId: string,
   ops: Op[]
-): Promise<number> {
+): Promise<PersistResult> {
+  let insertedSeq: number | null = null;
   if (ops.length > 0) {
     const rows = ops.map((op) => ({
       id: opKey(op),
@@ -50,9 +63,18 @@ export async function persistOps(
       op,
       byteSize: jsonByteSize(op),
     }));
-    await db.insert(documentOps).values(rows).onConflictDoNothing();
+    // RETURNING after ON CONFLICT DO NOTHING yields only the rows that were
+    // genuinely inserted, so duplicate re-pushes contribute nothing to the range.
+    const inserted = await db
+      .insert(documentOps)
+      .values(rows)
+      .onConflictDoNothing()
+      .returning({ seq: documentOps.seq });
+    if (inserted.length > 0) {
+      insertedSeq = inserted.reduce((m, r) => (r.seq > m ? r.seq : m), 0);
+    }
   }
-  return latestSeqFor(documentId);
+  return { latestSeq: await latestSeqFor(documentId), insertedSeq };
 }
 
 export interface PullResult {

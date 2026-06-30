@@ -80,6 +80,9 @@ const heartbeat = setInterval(() => {
     alive.set(client, false);
     client.ping();
   }
+  // Nudge any peer that dropped a broadcast under backpressure to re-pull, so a
+  // silent drop can't leave it permanently behind now that the poll is gone.
+  rooms.forEach((room) => room.resyncMissed());
 }, HEARTBEAT_MS);
 wss.on("close", () => clearInterval(heartbeat));
 
@@ -112,9 +115,13 @@ wss.on("connection", (socket: WebSocket, req: IncomingMessage) => {
   room.members.add(member);
 
   // Greet the newcomer with the server cursor + who's already here, then announce
-  // the join to everyone else.
+  // the join to everyone else. Seed the room watermark from the DB on first use so
+  // the first op broadcast carries a correct `fromSeq`.
   latestSeqFor(documentId)
-    .then((seq) => sendFrame(socket, { t: "welcome", seq, peers: room.peers() }))
+    .then((seq) => {
+      if (room.lastSeq === undefined) room.lastSeq = seq;
+      sendFrame(socket, { t: "welcome", seq, peers: room.peers() });
+    })
     .catch(() => sendFrame(socket, { t: "welcome", seq: 0, peers: room.peers() }));
   room.broadcast({ t: "presence", peers: room.peers() }, member);
 
@@ -144,14 +151,35 @@ wss.on("connection", (socket: WebSocket, req: IncomingMessage) => {
       return;
     }
 
-    persistOps(documentId, member.userId, frame.ops)
-      .then((seq) => {
-        room.broadcast({ t: "op", ops: frame.ops, seq, from: site }, member);
-        sendFrame(socket, { t: "ack", seq });
+    // Persist + broadcast atomically per room so concurrent authors can't
+    // interleave seq ranges. `fromSeq` lets peers verify a contiguous stream;
+    // we only broadcast when this batch actually inserted new rows, so a
+    // re-pushed (duplicate) batch never emits a phantom range.
+    void room
+      .runExclusive(async () => {
+        const before = room.lastSeq ?? (await latestSeqFor(documentId));
+        const { latestSeq, insertedSeq } = await persistOps(
+          documentId,
+          member.userId,
+          frame.ops
+        );
+        if (insertedSeq !== null) {
+          room.broadcast(
+            { t: "op", ops: frame.ops, fromSeq: before, seq: insertedSeq, from: site },
+            member
+          );
+          room.lastSeq = insertedSeq;
+        } else if (room.lastSeq === undefined) {
+          room.lastSeq = latestSeq;
+        }
+        // Ack lets the sender prune its durable oplog. We never advance the
+        // sender's cursor from this — `latestSeq` is a watermark that may include
+        // peer ops the sender hasn't received yet.
+        sendFrame(socket, { t: "ack", seq: latestSeq });
       })
       .catch(() => {
-        // Persist failed (e.g. a DB blip): the client still holds these ops in
-        // its durable oplog and the HTTP sync path retries, so just signal error.
+        // Persist failed (e.g. a DB blip): the client keeps these ops in its
+        // durable oplog and retries on reconnect, so just signal the error.
         sendFrame(socket, { t: "error", code: "server_error" });
       });
   });
