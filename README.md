@@ -15,9 +15,9 @@ live collaboration, and safe version restore.
 | Problem | Approach |
 | --- | --- |
 | **Browser memory management** | Documents live in IndexedDB (`idb`); a durable op-log + version snapshots with a documented pruning/compaction path. Merge work never blocks the editor thread. |
-| **State-synchronization races** | A background `SyncEngine` drains a durable oplog → push (idempotent) → prune → pull → merge → persist → advance cursor, serialized and offline-safe. Interrupted/partial syncs replay without dupes or loss. |
+| **State-synchronization races** | Edits push over the **websocket** straight from a durable oplog (one batch in flight, pruned only on the relay's ack); a **pull-only** catch-up reconciles on (re)connect or a detected gap → merge → persist → advance cursor. Serialized and offline-safe; interrupted/partial syncs replay without dupes or loss. **No periodic poll.** |
 | **Conflict-free merging** | A **hand-built CRDT** — an RGA (replicated growable array) over the text sequence, in `src/lib/crdt`. Property-tested for convergence, idempotency, and commutativity (1000-run randomized suites). No merge library. |
-| **The Google-Docs feel** | A self-hosted `ws` relay broadcasts ops + awareness for live co-editing, **remote cursors**, and **presence avatars** on top of the CRDT. |
+| **The Google-Docs feel** | A self-hosted `ws` relay persists + broadcasts ops and awareness for live co-editing, **remote cursors**, and **presence avatars** on top of the CRDT — the socket is both the durability path and the live channel. |
 
 ## Architecture
 
@@ -25,21 +25,24 @@ live collaboration, and safe version restore.
 Browser (source of truth)
   RGA (in-memory)  ──keystroke──►  diff → ops → apply (instant repaint)
        │                                  │
-       │                                  ├─► IndexedDB oplog (durable, debounced)
-       │                                  └─► ws relay (live broadcast to peers)
-       ▼
-  SyncEngine ──HTTP──►  /api/documents/[id]/ops  ──►  Postgres (durable op log)
-   (push/pull, offline-safe, idempotent)                    ▲
-                                                            │
-  ws relay (separate Node process) ──persists ops──────────┘
-   (live accelerator: cursors + presence; durability stays in the HTTP path)
+       │                                  └─► IndexedDB oplog (durable queue)
+       │                                          │  push over the socket
+       │                                          ▼  (one batch in flight)
+  ws relay (separate Node process) ──persists ops──►  Postgres (durable op log)
+   • broadcasts ops (+fromSeq) to peers                     ▲
+   • acks the sender ──► client prunes the oplog            │ HTTP pull
+       ▼                                                    │ (catch-up only)
+  SyncEngine ──on connect / reconnect / gap──►  /api/documents/[id]/ops
+   pull-only reconcile — no periodic poll; idle docs make no requests
 ```
 
 - **Local store = source of truth.** Reads/edits hit IndexedDB first; the network
   never blocks open/edit/close. Fully usable offline.
-- **Sync engine** reconciles both directions on reconnect without overwriting
-  offline work; the pull cursor is only advanced *after* the merged snapshot is
-  persisted, so a reload is always consistent.
+- **Durability rides the websocket.** Edits push over the socket and leave the
+  oplog only when the relay acks them; a pull-only catch-up (HTTP) reconciles
+  missed ops on (re)connect or when a frame's `fromSeq` reveals a gap. The pull
+  cursor advances only *after* the merged snapshot is persisted, so a reload is
+  always consistent — and an idle, in-sync document polls nothing.
 - **Versions** capture a snapshot + cursor; **restore emits forward CRDT ops**
   (never a destructive overwrite), so collaborators editing concurrently converge.
 - **AI** add-ons (summary / ask / title) stream from Groq, authenticated and
@@ -87,7 +90,7 @@ src/
   lib/
     crdt/      # the custom RGA CRDT (rga, clock, codec) — the core IP
     local/     # IndexedDB persistence (documents, oplog, meta)
-    sync/      # client sync engine (push/pull, status, realtime client)
+    sync/      # ws push queue (outbound), pull-only catch-up engine, realtime client, status
     realtime/  # shared ws protocol, frame validation, HMAC tickets
     http/      # streaming body-size guard
   modules/
@@ -118,9 +121,10 @@ validation, and the streaming body cap.
 ## Deployment
 
 The Next app deploys to Vercel from `main`; the `realtime/` relay deploys
-separately as a long-running Node service (Railway / Fly) with an origin
-allowlist. Both share `DATABASE_URL` + `BETTER_AUTH_SECRET`; see
-`realtime/README.md`. Developed and run on Node 22.
+separately as a long-running Node service — a **Hugging Face Docker Space** — with
+an origin allowlist. Both share `DATABASE_URL` + `BETTER_AUTH_SECRET`; full
+click-by-click steps are in **[DEPLOY.md](./DEPLOY.md)**. Developed and run on
+Node 22.
 
 ## Credit
 
