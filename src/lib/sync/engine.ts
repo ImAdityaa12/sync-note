@@ -1,22 +1,15 @@
 import type { RGA } from "@/lib/crdt/rga";
-import {
-  getCursor,
-  getPendingOps,
-  pruneOps,
-  setCursor,
-} from "@/lib/local/repo";
+import { getCursor, setCursor } from "@/lib/local/repo";
 
-import type { SyncStatus } from "./status";
 import { httpTransport, type SyncTransport } from "./transport";
 
 interface SyncEngineOptions {
   docId: string;
   rga: RGA;
-  /** Editors/owners push; viewers pull only (and the server enforces it too). */
-  canPush: boolean;
   /** Called after remote ops change the document, so the editor can re-render. */
   onRemoteApplied: () => void;
-  onStatus: (status: SyncStatus) => void;
+  /** Catch-up lifecycle, so the hook can derive the connection status. */
+  onState: (state: { active: boolean; errored: boolean }) => void;
   /**
    * Durably persist the current CRDT snapshot. Must be a single serialized
    * writer shared with the editor (the realtime path and local edits persist
@@ -27,18 +20,21 @@ interface SyncEngineOptions {
   transport?: SyncTransport;
 }
 
-const POLL_MS = 2500; // background pull cadence
-const PUSH_DEBOUNCE_MS = 600; // coalesce bursts of local edits before pushing
+const RETRY_BASE_MS = 1000;
+const RETRY_MAX_MS = 15_000;
 
 /**
- * Background sync engine. Reconciles the local CRDT with the server: drain the
- * durable oplog → push (idempotent) → prune; then pull ops since the saved
- * cursor → merge into the RGA → **persist the snapshot → advance the cursor**.
+ * Catch-up engine. Pulls ops the client hasn't seen and merges them: pull ops
+ * since the saved cursor → apply to the RGA → **persist the snapshot → advance
+ * the cursor**. That ordering makes a reload safe: the cursor is never advanced
+ * past ops the persisted snapshot doesn't yet reflect, so merged remote edits
+ * can't be lost.
  *
- * That ordering is what makes a reload safe: the cursor is never advanced past
- * ops that aren't yet in the persisted snapshot, so merged remote edits can't be
- * lost. Survives offline and interrupted syncs — unacked ops requeue and
- * re-applying an op is a no-op on both client (CRDT) and server (idempotent).
+ * It is **pull-only** — steady-state durability (pushing local edits) flows over
+ * the websocket now, so there is no periodic poll. Catch-up runs only on demand:
+ * on open, on (re)connect, when a welcome watermark is ahead of us, and when a
+ * live op frame reports a gap. A failed pull retries with backoff (the lone
+ * liveness backstop), but an idle, in-sync document issues no requests at all.
  */
 export class SyncEngine {
   private readonly opts: SyncEngineOptions;
@@ -46,101 +42,56 @@ export class SyncEngine {
   private running = false;
   private inFlight = false;
   private rerun = false;
-  private pollTimer: ReturnType<typeof setInterval> | null = null;
-  private pushTimer: ReturnType<typeof setTimeout> | null = null;
+  private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  private retryAttempts = 0;
 
   constructor(opts: SyncEngineOptions) {
     this.opts = opts;
     this.transport = opts.transport ?? httpTransport;
-    this.onOnline = this.onOnline.bind(this);
-    this.onOffline = this.onOffline.bind(this);
   }
 
   start(): void {
     if (this.running) return;
     this.running = true;
-    window.addEventListener("online", this.onOnline);
-    window.addEventListener("offline", this.onOffline);
-    this.pollTimer = setInterval(() => {
-      if (this.running) void this.sync();
-    }, POLL_MS);
-    void this.sync(); // initial catch-up on open
+    void this.catchUp(); // initial reconcile on open
   }
 
   stop(): void {
     this.running = false;
-    window.removeEventListener("online", this.onOnline);
-    window.removeEventListener("offline", this.onOffline);
-    if (this.pollTimer) clearInterval(this.pollTimer);
-    if (this.pushTimer) clearTimeout(this.pushTimer);
+    this.clearRetry();
   }
 
-  /** A local edit happened — schedule a (debounced) push. */
-  notifyLocalChange(): void {
-    if (this.pushTimer) clearTimeout(this.pushTimer);
-    this.pushTimer = setTimeout(() => void this.sync(), PUSH_DEBOUNCE_MS);
-  }
-
-  private onOnline(): void {
-    void this.sync();
-  }
-
-  private onOffline(): void {
-    this.opts.onStatus("offline");
-  }
-
-  /** One reconcile cycle. Public so it can be driven deterministically in tests. */
-  async sync(): Promise<void> {
-    // Only treat an *explicit* offline signal as offline — `navigator.onLine` is
-    // absent in non-browser runtimes (and Node 21+ defines a partial navigator).
-    if (typeof navigator !== "undefined" && navigator.onLine === false) {
-      this.opts.onStatus("offline");
-      return;
-    }
-    // Serialize: never overlap; coalesce a request that lands mid-run.
+  /**
+   * Pull everything we haven't seen, merge it, and advance the cursor. Public so
+   * it can be driven deterministically in tests and triggered by socket events.
+   * Coalesces: a request that lands mid-run re-runs once at the end.
+   */
+  async catchUp(): Promise<void> {
+    // Only attempt over a live network — `navigator.onLine` is absent in some
+    // non-browser runtimes, so treat only an explicit `false` as offline.
+    if (typeof navigator !== "undefined" && navigator.onLine === false) return;
     if (this.inFlight) {
       this.rerun = true;
       return;
     }
     this.inFlight = true;
-    this.opts.onStatus("syncing");
+    this.opts.onState({ active: true, errored: false });
 
     try {
-      const { docId, rga, canPush } = this.opts;
-
-      // 1) Push pending local ops, then prune exactly what we pushed.
-      if (canPush) {
-        const pending = await getPendingOps(docId);
-        if (pending.length > 0) {
-          await this.transport.push(
-            docId,
-            pending.map((p) => p.op)
-          );
-          await pruneOps(
-            pending
-              .map((p) => p.localSeq)
-              .filter((seq): seq is number => seq !== undefined)
-          );
-        }
-      }
-
-      // 2) Pull everything we haven't seen; merge, persist, then advance cursor.
+      const { docId, rga } = this.opts;
       let since = await getCursor(docId);
       let changed = false;
       for (;;) {
-        const { ops, latestSeq, hasMore } = await this.transport.pull(
-          docId,
-          since
-        );
+        const { ops, latestSeq, hasMore } = await this.transport.pull(docId, since);
         if (ops.length > 0) {
           for (const op of ops) {
             if (rga.apply(op)) changed = true;
           }
-          // Persist BEFORE advancing the cursor whenever we pulled ops — even
-          // ops already applied live over the socket, which aren't yet in the
-          // snapshot. The cursor is the "durably snapshotted" watermark, so it
-          // must never move past ops the snapshot doesn't reflect, or a reload
-          // would load stale content and never re-pull them.
+          // Persist BEFORE advancing the cursor whenever we pulled ops — even ops
+          // already applied live over the socket, which may not be in the snapshot
+          // yet. The cursor is the "durably snapshotted" watermark, so it must
+          // never move past ops the snapshot doesn't reflect, or a reload would
+          // load stale content and never re-pull them.
           await this.opts.persist();
         }
         if (latestSeq > since) {
@@ -151,16 +102,40 @@ export class SyncEngine {
       }
 
       if (changed) this.opts.onRemoteApplied();
-      this.opts.onStatus("synced");
+      this.opts.onState({ active: false, errored: false });
+      this.clearRetry();
     } catch {
-      // Network/server error — stay queued and retry on the next tick.
-      this.opts.onStatus("error");
+      // Network/server error — surface it and retry with backoff so a transient
+      // blip self-heals without a steady-state poll.
+      this.opts.onState({ active: false, errored: true });
+      this.scheduleRetry();
     } finally {
       this.inFlight = false;
       if (this.rerun) {
         this.rerun = false;
-        void this.sync();
+        void this.catchUp();
       }
+    }
+  }
+
+  private scheduleRetry(): void {
+    if (!this.running || this.retryTimer) return;
+    const delay = Math.min(
+      RETRY_MAX_MS,
+      RETRY_BASE_MS * 2 ** this.retryAttempts
+    );
+    this.retryAttempts++;
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = null;
+      void this.catchUp();
+    }, delay);
+  }
+
+  private clearRetry(): void {
+    this.retryAttempts = 0;
+    if (this.retryTimer) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = null;
     }
   }
 }

@@ -11,8 +11,10 @@ import {
   getOrCreateSiteId,
   loadDocumentRecord,
   saveSnapshot,
+  setCursor,
 } from "@/lib/local/repo";
 import { SyncEngine } from "@/lib/sync/engine";
+import { OutboundQueue } from "@/lib/sync/outbound";
 import { RealtimeClient } from "@/lib/sync/realtime";
 import type { SyncStatus } from "@/lib/sync/status";
 import { diffText } from "@/modules/editor/lib/text-diff";
@@ -22,33 +24,49 @@ export type LocalSaveStatus = "loading" | "saving" | "saved";
 
 const SAVE_DEBOUNCE_MS = 400;
 
+const initialOnline = () =>
+  typeof navigator === "undefined" ? true : navigator.onLine;
+
 /**
- * Local-first, CRDT-backed document binding with background sync.
+ * Local-first, CRDT-backed document binding with realtime sync.
  *
  * Content lives in an in-memory `RGA`. Every keystroke is diffed into ops,
  * applied synchronously (responsive typing), queued in the durable `oplog`, and
- * snapshotted to IndexedDB on a debounce. A `SyncEngine` drains that oplog to the
- * server and merges remote ops back in — the network is never on the path of a
- * keystroke. Editors push; viewers pull only.
+ * snapshotted to IndexedDB on a debounce. An `OutboundQueue` drains that oplog to
+ * the server **over the websocket** (durability lives on the socket: prune on
+ * ack), while a pull-only `SyncEngine` catches up on anything we missed when we
+ * (re)connect. The network is never on the path of a keystroke. Editors push;
+ * viewers pull only.
  */
 export function useDocument(docId: string, canEdit: boolean) {
   const [content, setContent] = useState("");
   const [status, setStatus] = useState<LocalSaveStatus>("loading");
-  const [syncStatus, setSyncStatus] = useState<SyncStatus>("connecting");
   /** Other people live in the room (presence + cursors), excluding this client. */
   const [peers, setPeers] = useState<Peer[]>([]);
   /** Whether the low-latency realtime socket is currently connected. */
   const [live, setLive] = useState(false);
+  /** Browser network reachability (drives the "offline" badge). */
+  const [online, setOnline] = useState(initialOnline);
+  /** Local edits queued/in-flight to the server but not yet acked. */
+  const [pendingOut, setPendingOut] = useState(false);
+  /** A catch-up pull is currently running. */
+  const [catchActive, setCatchActive] = useState(false);
+  /** The last catch-up pull failed. */
+  const [catchErrored, setCatchErrored] = useState(false);
 
   const rgaRef = useRef<RGA | null>(null);
   const engineRef = useRef<SyncEngine | null>(null);
   const realtimeRef = useRef<RealtimeClient | null>(null);
+  const outboundRef = useRef<OutboundQueue | null>(null);
   const pendingOpsRef = useRef<Op[]>([]);
   const dirtyRef = useRef(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // The currently-running flush, so a caller (e.g. restore) can await a flush
   // that's already mid-write instead of racing past it.
   const flushPromiseRef = useRef<Promise<void>>(Promise.resolve());
+  // Serializes remote-op batches so two frames can't both read the same cursor
+  // and one wrongly conclude there's a gap.
+  const applyChainRef = useRef<Promise<void>>(Promise.resolve());
 
   // Single serialized snapshot writer. Local edits, pulled remote ops, and the
   // realtime path all persist through this one chain, so a stale write started
@@ -63,11 +81,30 @@ export function useDocument(docId: string, canEdit: boolean) {
     return done;
   }, [docId]);
 
-  // Restore the CRDT from IndexedDB, then start the sync engine.
+  // Persist the snapshot and *then* advance the pull cursor, atomically on the
+  // write chain — the persist-before-advance invariant for remote ops applied
+  // live over the socket. The cursor must never move past content the snapshot
+  // doesn't yet reflect, or a reload would skip those ops.
+  const persistAndAdvance = useCallback(
+    (seq: number): Promise<void> => {
+      const done = writeChainRef.current.then(async () => {
+        const rga = rgaRef.current;
+        if (rga) await saveSnapshot(docId, rga.snapshot());
+        await setCursor(docId, seq);
+      });
+      writeChainRef.current = done.catch(() => {});
+      return done;
+    },
+    [docId]
+  );
+
+  // Restore the CRDT from IndexedDB, then start sync (push over the socket,
+  // catch-up over HTTP).
   useEffect(() => {
     let cancelled = false;
     let engine: SyncEngine | null = null;
     let realtime: RealtimeClient | null = null;
+    let outbound: OutboundQueue | null = null;
 
     (async () => {
       const siteId = await getOrCreateSiteId(docId);
@@ -85,42 +122,89 @@ export function useDocument(docId: string, canEdit: boolean) {
       setContent(rga.toString());
       setStatus("saved");
 
+      // Apply a remote op batch gap-safely. Serialized so back-to-back frames
+      // advance the cursor in order rather than racing on a stale read.
+      const applyRemoteBatch = (batch: {
+        ops: Op[];
+        fromSeq: number;
+        seq: number;
+      }) => {
+        applyChainRef.current = applyChainRef.current
+          .then(async () => {
+            if (cancelled) return;
+            const cursor = await getCursor(docId);
+            if (batch.seq <= cursor) return; // already have it
+            if (batch.fromSeq !== cursor) {
+              // We missed ops — fall back to a full HTTP catch-up (coalesced).
+              void engineRef.current?.catchUp();
+              return;
+            }
+            let changed = false;
+            for (const op of batch.ops) if (rga.apply(op)) changed = true;
+            await persistAndAdvance(batch.seq);
+            if (changed && !cancelled) setContent(rga.toString());
+          })
+          .catch(() => {});
+      };
+
+      // A welcome watermark ahead of our cursor (on connect, or a backpressure
+      // nudge) means we have catching up to do.
+      const onWelcomeSeq = async (seq: number) => {
+        if (cancelled) return;
+        if (seq > (await getCursor(docId))) void engineRef.current?.catchUp();
+      };
+
       engine = new SyncEngine({
         docId,
         rga,
-        canPush: canEdit,
         onRemoteApplied: () => {
           if (!cancelled) setContent(rga.toString());
         },
-        onStatus: (s) => {
-          if (!cancelled) setSyncStatus(s);
+        onState: ({ active, errored }) => {
+          if (cancelled) return;
+          setCatchActive(active);
+          setCatchErrored(errored);
         },
         persist,
       });
       engineRef.current = engine;
-      engine.start();
 
-      // Live accelerator: apply remote ops the instant they arrive and broadcast
-      // ours. Durability still flows through the engine/oplog above, so this is
-      // pure latency — if the socket never connects, the doc still converges.
+      // Live socket: applies remote ops the instant they arrive, broadcasts ours,
+      // and carries durability (acks prune the oplog).
       realtime = new RealtimeClient({
         docId,
         site: siteId,
-        onOps: (ops) => {
-          let changed = false;
-          for (const op of ops) if (rga.apply(op)) changed = true;
-          // Apply + repaint only; durability is the engine's job (it persists
-          // before advancing the cursor), so we never write a snapshot here.
-          if (changed && !cancelled) setContent(rga.toString());
-        },
+        onOps: applyRemoteBatch,
+        onWelcome: (seq) => void onWelcomeSeq(seq),
+        onAck: () => void outboundRef.current?.onAck(),
+        onError: () => outboundRef.current?.onError(),
         onPresence: (all) => {
           if (!cancelled) setPeers(all.filter((p) => p.site !== siteId));
         },
         onConnectedChange: (connected) => {
-          if (!cancelled) setLive(connected);
+          if (cancelled) return;
+          setLive(connected);
+          if (connected) {
+            outboundRef.current?.onConnect(); // drain anything queued offline
+            void engineRef.current?.catchUp(); // pull anything we missed
+          } else {
+            outboundRef.current?.onDisconnect();
+          }
         },
       });
       realtimeRef.current = realtime;
+
+      outbound = new OutboundQueue({
+        docId,
+        canPush: canEdit,
+        send: (ops) => realtimeRef.current?.sendOps(ops) ?? false,
+        onPendingChange: (has) => {
+          if (!cancelled) setPendingOut(has);
+        },
+      });
+      outboundRef.current = outbound;
+
+      engine.start();
       realtime.start();
     })().catch(() => {
       if (!cancelled) setStatus("saved");
@@ -132,23 +216,41 @@ export function useDocument(docId: string, canEdit: boolean) {
       engineRef.current = null;
       realtime?.stop();
       realtimeRef.current = null;
+      outbound?.onDisconnect(); // clear its ack timer
+      outboundRef.current = null;
       setLive(false);
       setPeers([]);
+      setPendingOut(false);
+      setCatchActive(false);
     };
-  }, [docId, canEdit, persist]);
+  }, [docId, canEdit, persist, persistAndAdvance]);
+
+  // Network reachability → status, and a reconnect kick when we come back.
+  useEffect(() => {
+    const goOnline = () => {
+      setOnline(true);
+      void engineRef.current?.catchUp();
+    };
+    const goOffline = () => setOnline(false);
+    window.addEventListener("online", goOnline);
+    window.addEventListener("offline", goOffline);
+    return () => {
+      window.removeEventListener("online", goOnline);
+      window.removeEventListener("offline", goOffline);
+    };
+  }, []);
 
   // Durability tail shared by every local-write path (debounced flush + restore):
-  // broadcast live, append to the durable oplog, persist the snapshot, then kick
-  // a push. One copy so the broadcast/persist ordering can't drift between paths.
+  // append to the durable oplog, persist the snapshot, then push it over the
+  // socket. One copy so the persist/push ordering can't drift between paths.
   const commitOps = useCallback(
     async (ops: Op[]) => {
       if (ops.length === 0) return;
-      realtimeRef.current?.sendOps(ops); // broadcast live; durability below
       try {
         await appendOps(docId, ops);
         await persist();
         setStatus("saved");
-        engineRef.current?.notifyLocalChange(); // kick off a push
+        outboundRef.current?.kick(); // push over the socket; ack prunes it
       } catch {
         // Best-effort: state stays in memory and retries on the next edit/sync.
       }
@@ -200,15 +302,15 @@ export function useDocument(docId: string, canEdit: boolean) {
 
   /**
    * Restore a saved version as forward CRDT ops (never a destructive overwrite).
-   * It runs through the exact same path as a keystroke — diff → ops → broadcast →
-   * oplog → persist — so a peer editing concurrently still converges. Returns
-   * once the restore is durably queued.
+   * It runs through the exact same path as a keystroke — diff → ops → oplog →
+   * persist → socket push — so a peer editing concurrently still converges.
+   * Returns once the restore is durably queued.
    */
   const restore = useCallback(
     async (text: string) => {
       // Restore writes ops; viewers never push (UI hides it, server re-checks,
-      // and the engine's canPush is false). Guard here too so a viewer can't
-      // accumulate ops in a local oplog that will never be pushed or pruned.
+      // and the outbound queue's canPush is false). Guard here too so a viewer
+      // can't accumulate ops in a local oplog that will never be pushed or pruned.
       if (!canEdit) return;
       const rga = rgaRef.current;
       if (!rga) return;
@@ -235,10 +337,10 @@ export function useDocument(docId: string, canEdit: boolean) {
    * Capture the current document for a version snapshot: the live materialized
    * text together with the pull cursor it reflects.
    *
-   * Read the cursor *first*, then the content. The engine applies pulled ops to
-   * the RGA before it advances the cursor, so content read after the cursor can
-   * only reflect the same-or-more server ops — never fewer. That keeps `baseSeq`
-   * an under-claim of what `content` covers (the compaction-safe direction); the
+   * Read the cursor *first*, then the content. Pulled ops are persisted to the
+   * RGA before the cursor advances, so content read after the cursor can only
+   * reflect the same-or-more server ops — never fewer. That keeps `baseSeq` an
+   * under-claim of what `content` covers (the compaction-safe direction); the
    * reverse order would let a pull during the await push the cursor past the
    * captured text and over-claim coverage.
    */
@@ -265,6 +367,17 @@ export function useDocument(docId: string, canEdit: boolean) {
   const reportCursor = useCallback((anchor: number, head: number) => {
     realtimeRef.current?.sendCursor(anchor, head);
   }, []);
+
+  // Derive the single sync badge from the socket + queue + catch-up state.
+  const syncStatus: SyncStatus = !online
+    ? "offline"
+    : !live
+      ? "connecting"
+      : catchActive || pendingOut
+        ? "syncing"
+        : catchErrored
+          ? "error"
+          : "synced";
 
   return {
     content,

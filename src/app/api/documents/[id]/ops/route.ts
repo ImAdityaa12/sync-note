@@ -80,7 +80,7 @@ export async function POST(
 
   // Idempotent persist (shared with the realtime relay): re-pushing an op is a
   // no-op, so an interrupted sync can retry without duplicating.
-  const latestSeq = await persistOps(documentId, user.id, parsed.data.ops);
+  const { latestSeq } = await persistOps(documentId, user.id, parsed.data.ops);
   return Response.json({ ok: true, latestSeq });
 }
 

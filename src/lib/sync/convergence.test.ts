@@ -4,10 +4,12 @@ import { describe, expect, it } from "vitest";
 
 import type { Op } from "@/lib/crdt/codec";
 import { RGA } from "@/lib/crdt/rga";
+import { MAX_OPS_PER_FRAME } from "@/lib/realtime/protocol";
 import {
   appendOps,
   getPendingOps,
   loadDocumentRecord,
+  pruneOps,
   saveSnapshot,
 } from "@/lib/local/repo";
 
@@ -63,21 +65,61 @@ function makeSharedServer() {
 
 const noop = () => {};
 
-function engineFor(
+function engineFor(docId: string, rga: RGA, transport: SyncTransport) {
+  return new SyncEngine({
+    docId,
+    rga,
+    transport,
+    onRemoteApplied: noop,
+    onState: noop,
+    persist: () => saveSnapshot(docId, rga.snapshot()),
+  });
+}
+
+/**
+ * Drain the durable oplog over a reliable channel — the test-rig equivalent of
+ * the websocket `OutboundQueue` (send a batch, prune it once the server has it).
+ * Editors push; viewers don't. Mirrors the real prune-after-ack semantics.
+ */
+async function pushAll(
+  docId: string,
+  transport: SyncTransport,
+  canPush: boolean
+): Promise<void> {
+  if (!canPush) return;
+  for (;;) {
+    const pending = await getPendingOps(docId);
+    if (pending.length === 0) break;
+    const batch = pending.slice(0, MAX_OPS_PER_FRAME);
+    await transport.push(
+      docId,
+      batch.map((p) => p.op)
+    ); // may throw (flaky transport) → caller leaves it queued
+    await pruneOps(
+      batch
+        .map((p) => p.localSeq)
+        .filter((s): s is number => s !== undefined)
+    );
+  }
+}
+
+/**
+ * One full reconcile cycle for a client: push the oplog (websocket path), then
+ * catch up over HTTP (pull). A push failure leaves the batch queued for retry,
+ * exactly as the real split does (the queue retries; the engine still pulls).
+ */
+async function syncPeer(
   docId: string,
   rga: RGA,
   transport: SyncTransport,
   canPush = true
-) {
-  return new SyncEngine({
-    docId,
-    rga,
-    canPush,
-    transport,
-    onRemoteApplied: noop,
-    onStatus: noop,
-    persist: () => saveSnapshot(docId, rga.snapshot()),
-  });
+): Promise<void> {
+  try {
+    await pushAll(docId, transport, canPush);
+  } catch {
+    // Lost ack / dropped connection — ops stay in the oplog and retry next cycle.
+  }
+  await engineFor(docId, rga, transport).catchUp();
 }
 
 describe("multi-client convergence (Phase D/E DoD)", () => {
@@ -96,13 +138,13 @@ describe("multi-client convergence (Phase D/E DoD)", () => {
     expect(b.toString()).toBe("BBB");
 
     // B reconnects first: pushes its work, sees nothing of A's yet.
-    await engineFor(docB, b, transport).sync();
+    await syncPeer(docB, b, transport);
 
     // A reconnects: pushes its queued offline work AND pulls B's — converges.
-    await engineFor(docA, a, transport).sync();
+    await syncPeer(docA, a, transport);
 
     // B syncs again and pulls A's ops — converges to the same string.
-    await engineFor(docB, b, transport).sync();
+    await syncPeer(docB, b, transport);
 
     // Determinism: identical document on both peers.
     expect(a.toString()).toBe(b.toString());
@@ -121,9 +163,9 @@ describe("multi-client convergence (Phase D/E DoD)", () => {
     await appendOps(docA, a.insertAt(0, "hello "));
     await appendOps(docB, b.insertAt(0, "world"));
 
-    await engineFor(docB, b, transport).sync();
-    await engineFor(docA, a, transport).sync();
-    await engineFor(docB, b, transport).sync();
+    await syncPeer(docB, b, transport);
+    await syncPeer(docA, a, transport);
+    await syncPeer(docB, b, transport);
 
     const converged = a.toString();
     expect(b.toString()).toBe(converged);
@@ -144,19 +186,17 @@ describe("multi-client convergence (Phase D/E DoD)", () => {
     await appendOps(docA, a.insertAt(0, "abc"));
     await appendOps(docB, b.insertAt(0, "xyz"));
 
-    const engA = engineFor(docA, a, transport);
-    const engB = engineFor(docB, b, transport);
-    await engB.sync();
-    await engA.sync();
-    await engB.sync();
+    await syncPeer(docB, b, transport);
+    await syncPeer(docA, a, transport);
+    await syncPeer(docB, b, transport);
 
     const converged = a.toString();
     const opCount = size();
 
     // Run several more cycles; nothing new should be produced or applied.
-    await engA.sync();
-    await engB.sync();
-    await engA.sync();
+    await syncPeer(docA, a, transport);
+    await syncPeer(docB, b, transport);
+    await syncPeer(docA, a, transport);
 
     expect(size()).toBe(opCount); // server gained no duplicate rows
     expect(a.toString()).toBe(converged);
@@ -185,14 +225,13 @@ describe("multi-client convergence (Phase D/E DoD)", () => {
     const rga = new RGA("A");
     await appendOps(docId, rga.insertAt(0, "important"));
 
-    const engine = engineFor(docId, rga, flaky);
-    await engine.sync(); // push lands server-side, ack is lost → engine treats as failed
+    await syncPeer(docId, rga, flaky); // push lands server-side, ack is lost → push treated as failed
 
     // The ops are persisted on the server but the client kept them queued (it
     // never saw the ack), so nothing is lost and a retry is safe.
     expect((await getPendingOps(docId)).length).toBeGreaterThan(0);
 
-    await engine.sync(); // retry: server dedups the re-push, client prunes
+    await syncPeer(docId, rga, flaky); // retry: server dedups the re-push, client prunes
 
     expect(await getPendingOps(docId)).toHaveLength(0); // no loss — fully acked now
     expect(size()).toBe("important".length); // idempotent — no duplicate rows
@@ -210,11 +249,11 @@ describe("multi-client convergence (Phase D/E DoD)", () => {
     await appendOps(editorDoc, editor.insertAt(0, "official"));
     await appendOps(viewerDoc, viewer.insertAt(0, "sneaky")); // viewer tries to edit
 
-    await engineFor(editorDoc, editor, transport).sync();
-    await engineFor(viewerDoc, viewer, transport, false).sync(); // canPush=false
+    await syncPeer(editorDoc, editor, transport);
+    await syncPeer(viewerDoc, viewer, transport, false); // canPush=false
 
     // The editor pulls everything on the server — the viewer's ops aren't there.
-    await engineFor(editorDoc, editor, transport).sync();
+    await syncPeer(editorDoc, editor, transport);
     expect(editor.toString()).toBe("official");
     expect(editor.toString()).not.toContain("sneaky");
   });
