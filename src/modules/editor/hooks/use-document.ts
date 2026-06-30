@@ -247,10 +247,13 @@ export function useDocument(docId: string, canEdit: boolean) {
     async (ops: Op[]) => {
       if (ops.length === 0) return;
       try {
+        // Durably queue first, then push over the socket, then snapshot — so a
+        // snapshot write failure can't stop acked ops from reaching the server
+        // (the oplog is the durable queue; ack prunes it).
         await appendOps(docId, ops);
+        outboundRef.current?.kick();
         await persist();
         setStatus("saved");
-        outboundRef.current?.kick(); // push over the socket; ack prunes it
       } catch {
         // Best-effort: state stays in memory and retries on the next edit/sync.
       }
