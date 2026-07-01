@@ -5,7 +5,7 @@ import { GitHubIcon, LinkedInIcon } from "@/components/provider-icons";
 const DEVELOPER = {
   name: "Aditya",
   github: "https://github.com/ImAdityaa12",
-  linkedin: "https://www.linkedin.com/in/imadityaa12",
+  linkedin: "https://www.linkedin.com/in/aditya-raj-gupta-089393215",
 };
 
 export function SiteFooter() {
