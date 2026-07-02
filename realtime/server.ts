@@ -51,10 +51,12 @@ const rooms = new Rooms();
 let connCounter = 0;
 
 const httpServer = createServer((req, res) => {
-  // A plain HTTP GET is only ever a health check; everything else upgrades.
-  if (req.method === "GET" && (req.url === "/health" || req.url === "/")) {
+  // A plain HTTP GET/HEAD is only ever a health check; everything else upgrades.
+  // HEAD is the default probe method for many uptime monitors (e.g. UptimeRobot),
+  // so it must return 200 too — Node strips the body from HEAD responses.
+  if ((req.method === "GET" || req.method === "HEAD") && (req.url === "/health" || req.url === "/")) {
     res.writeHead(200, { "content-type": "text/plain" });
-    res.end("ok");
+    res.end(req.method === "HEAD" ? undefined : "ok");
     return;
   }
   res.writeHead(426, { "content-type": "text/plain" });
