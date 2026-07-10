@@ -1,5 +1,6 @@
 import { PayloadTooLargeError, readJsonWithLimit } from "@/lib/http/read-json";
 import { rateLimit } from "@/lib/rate-limit";
+import { appendChatTurn } from "@/modules/ai/server/chat-store";
 import { aiConfigured, streamAiTask } from "@/modules/ai/server/generate";
 import { aiTaskSchema } from "@/modules/ai/schema";
 import {
@@ -74,5 +75,17 @@ export async function POST(
     return new Response(message, { status: 422 });
   }
 
-  return streamAiTask(parsed.data, request.signal);
+  // Persist the completed turn into the user's private chat for this document.
+  // Runs server-side on finish, so what's stored is the validated question and
+  // the model's own output — the client can't forge chat content.
+  const data = parsed.data;
+  return streamAiTask(data, request.signal, (answer) =>
+    appendChatTurn({
+      documentId,
+      userId: user.id,
+      task: data.task,
+      question: data.task === "ask" ? data.question : null,
+      answer,
+    })
+  );
 }

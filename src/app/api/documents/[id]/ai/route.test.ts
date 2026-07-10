@@ -12,6 +12,9 @@ vi.mock("@/modules/ai/server/generate", () => ({
   aiConfigured: vi.fn(() => true),
   streamAiTask: vi.fn(() => new Response("stream")),
 }));
+vi.mock("@/modules/ai/server/chat-store", () => ({
+  appendChatTurn: vi.fn(),
+}));
 
 import {
   getCurrentUser,
