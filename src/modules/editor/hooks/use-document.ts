@@ -1,6 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 
 import type { Op } from "@/lib/crdt/codec";
 import { RGA } from "@/lib/crdt/rga";
@@ -24,8 +30,15 @@ export type LocalSaveStatus = "loading" | "saving" | "saved";
 
 const SAVE_DEBOUNCE_MS = 400;
 
-const initialOnline = () =>
-  typeof navigator === "undefined" ? true : navigator.onLine;
+/** Subscribe to browser online/offline transitions (for `useSyncExternalStore`). */
+function subscribeOnline(onChange: () => void) {
+  window.addEventListener("online", onChange);
+  window.addEventListener("offline", onChange);
+  return () => {
+    window.removeEventListener("online", onChange);
+    window.removeEventListener("offline", onChange);
+  };
+}
 
 /**
  * Local-first, CRDT-backed document binding with realtime sync.
@@ -45,8 +58,14 @@ export function useDocument(docId: string, canEdit: boolean) {
   const [peers, setPeers] = useState<Peer[]>([]);
   /** Whether the low-latency realtime socket is currently connected. */
   const [live, setLive] = useState(false);
-  /** Browser network reachability (drives the "offline" badge). */
-  const [online, setOnline] = useState(initialOnline);
+  // Browser network reachability (drives the "offline" badge). The server (and
+  // the first client render) snapshot to `true`, then the client reconciles with
+  // the real `navigator.onLine` — so this never causes a hydration mismatch.
+  const online = useSyncExternalStore(
+    subscribeOnline,
+    () => navigator.onLine,
+    () => true
+  );
   /** Local edits queued/in-flight to the server but not yet acked. */
   const [pendingOut, setPendingOut] = useState(false);
   /** A catch-up pull is currently running. */
@@ -225,20 +244,11 @@ export function useDocument(docId: string, canEdit: boolean) {
     };
   }, [docId, canEdit, persist, persistAndAdvance]);
 
-  // Network reachability → status, and a reconnect kick when we come back.
+  // When we come back online, kick a catch-up pull for anything missed offline.
+  // (The `online` value itself is tracked by `useSyncExternalStore` above.)
   useEffect(() => {
-    const goOnline = () => {
-      setOnline(true);
-      void engineRef.current?.catchUp();
-    };
-    const goOffline = () => setOnline(false);
-    window.addEventListener("online", goOnline);
-    window.addEventListener("offline", goOffline);
-    return () => {
-      window.removeEventListener("online", goOnline);
-      window.removeEventListener("offline", goOffline);
-    };
-  }, []);
+    if (online) void engineRef.current?.catchUp();
+  }, [online]);
 
   // Durability tail shared by every local-write path (debounced flush + restore):
   // append to the durable oplog, persist the snapshot, then push it over the

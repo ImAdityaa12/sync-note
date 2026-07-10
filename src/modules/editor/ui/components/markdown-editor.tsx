@@ -2,7 +2,7 @@
 
 import { useCallback, useDeferredValue, useLayoutEffect, useRef } from "react";
 
-import { AiAssistant } from "@/modules/ai/ui/components/ai-assistant";
+import { ChatSidebar } from "@/modules/ai/ui/components/chat-sidebar";
 import { useDocument } from "@/modules/editor/hooks/use-document";
 import { VersionHistory } from "@/modules/versions/ui/components/version-history";
 
@@ -67,7 +67,7 @@ export function MarkdownEditor({
           />
           {!loading && (
             <>
-              <AiAssistant docId={docId} canEdit={canEdit} content={content} />
+              <ChatSidebar docId={docId} canEdit={canEdit} content={content} />
               <VersionHistory
                 docId={docId}
                 canEdit={canEdit}
