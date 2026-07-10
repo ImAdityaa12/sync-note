@@ -6,9 +6,8 @@ import Link from "next/link";
 import { Logo } from "@/components/logo";
 import { SiteFooter } from "@/components/site-footer";
 import { ThemeToggle } from "@/components/theme-toggle";
-import { UserAvatar } from "@/components/user-avatar";
 import { auth } from "@/lib/auth";
-import { SignOutButton } from "@/modules/auth/ui/components/sign-out-button";
+import { UserMenu } from "@/modules/auth/ui/components/user-menu";
 
 /**
  * Shared chrome + authoritative auth guard for every dashboard route
@@ -36,8 +35,12 @@ export default async function DashboardLayout({
         </Link>
         <div className="flex items-center gap-3">
           <ThemeToggle />
-          <SignOutButton />
-          <UserAvatar name={user.name} image={user.image} className="size-8" />
+          <UserMenu
+            name={user.name}
+            email={user.email}
+            image={user.image}
+            createdAt={user.createdAt}
+          />
         </div>
       </header>
 
