@@ -148,6 +148,43 @@ export const documentOps = pgTable(
 );
 
 /**
+ * Per-user AI assistant chat, private to each collaborator.
+ *
+ * A document's chat is scoped to (document, user): every member gets their own
+ * conversation and never sees anyone else's questions. `role` distinguishes the
+ * user's prompt from the assistant's reply; `task` records which assistant
+ * action produced the message (summary / ask / title) so the transcript and its
+ * exports can label turns. Cascades on both the document and the user so a
+ * deleted doc or account takes its chats with it.
+ */
+export const aiChatRole = pgEnum("ai_chat_role", ["user", "assistant"]);
+
+export const documentChatMessages = pgTable(
+  "document_chat_messages",
+  {
+    id: text("id").primaryKey(),
+    documentId: text("document_id")
+      .notNull()
+      .references(() => documents.id, { onDelete: "cascade" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    role: aiChatRole("role").notNull(),
+    task: text("task"),
+    content: text("content").notNull(),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (table) => [
+    // Loading one user's chat for a document, oldest-first, is the hot path.
+    index("document_chat_messages_doc_user_idx").on(
+      table.documentId,
+      table.userId,
+      table.createdAt
+    ),
+  ]
+);
+
+/**
  * Point-in-time version snapshots for time-travel. `state` is the materialized
  * document at capture; `uptoSeq` records the op cursor so a restore can be
  * expressed as forward ops rather than a destructive overwrite.

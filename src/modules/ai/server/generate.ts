@@ -78,8 +78,17 @@ function plan(input: AiTaskInput): Plan {
  * 200 response has already begun) — it routes the error to `onError` and closes
  * the text stream. Without `onError` the failure would vanish silently, so we log
  * it server-side; the client treats an empty stream as a failed generation.
+ *
+ * `onComplete` runs once, server-side, with the full generated text when the
+ * stream finishes cleanly — the caller uses it to persist the turn. It is
+ * skipped when the request was aborted or nothing was produced, so an
+ * interrupted generation never lands in the durable chat.
  */
-export function streamAiTask(input: AiTaskInput, signal: AbortSignal): Response {
+export function streamAiTask(
+  input: AiTaskInput,
+  signal: AbortSignal,
+  onComplete?: (text: string) => void | Promise<void>
+): Response {
   const { model, system, prompt, maxOutputTokens, temperature } = plan(input);
   const result = streamText({
     model: groq(model),
@@ -90,6 +99,15 @@ export function streamAiTask(input: AiTaskInput, signal: AbortSignal): Response 
     abortSignal: signal,
     onError: ({ error }) => {
       console.error("[ai] generation failed:", error);
+    },
+    onFinish: ({ text }) => {
+      if (!onComplete || signal.aborted) return;
+      const trimmed = text.trim();
+      if (!trimmed) return;
+      // Persistence must not break or delay the response stream.
+      void Promise.resolve(onComplete(trimmed)).catch((error) => {
+        console.error("[ai] failed to persist chat turn:", error);
+      });
     },
   });
   // `toTextStreamResponse()` is deprecated in ai@7; the standalone helper over
