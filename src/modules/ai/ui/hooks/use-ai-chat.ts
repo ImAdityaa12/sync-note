@@ -4,10 +4,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { userPromptFor } from "@/modules/ai/lib/user-prompt";
 import type { AiTask } from "@/modules/ai/schema";
-import {
-  clearChatMessages,
-  getChatMessages,
-} from "@/modules/ai/server/actions";
 import type { ChatMessage } from "@/modules/ai/types";
 
 interface RunOptions {
@@ -61,9 +57,10 @@ export function useAiChat(docId: string) {
   const load = useCallback(async () => {
     if (loaded) return;
     try {
-      const result = await getChatMessages(docId);
-      // A load failure just leaves the transcript empty; a new chat still works.
-      if (result.ok && mountedRef.current) setMessages(result.data);
+      const res = await fetch(`/api/documents/${docId}/ai/messages`);
+      if (!res.ok) return; // a load failure just leaves the transcript empty
+      const data = (await res.json()) as { messages: ChatMessage[] };
+      if (mountedRef.current) setMessages(data.messages);
     } catch {
       // Offline / transient — the user can still start a new chat.
     } finally {
@@ -183,7 +180,7 @@ export function useAiChat(docId: string) {
     setError(null);
     setMessages([]);
     try {
-      await clearChatMessages(docId);
+      await fetch(`/api/documents/${docId}/ai/messages`, { method: "DELETE" });
     } catch {
       // Best-effort: the local view is already cleared; a reload re-syncs.
     }
